@@ -1,0 +1,9 @@
+# 忽略酒馆本地产物
+data/
+*.log
+.DS_Store
+Thumbs.db
+
+# 本地测试截图 / 临时检查文件
+_*.png
+_*.mjs

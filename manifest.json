@@ -1,0 +1,12 @@
+{
+  "display_name": "微信 · WeChat for SillyTavern",
+  "loading_order": 100,
+  "requires": [],
+  "optional": [],
+  "js": "extension/index.js",
+  "css": "extension/style.css",
+  "author": "zzzu2221",
+  "version": "1.0.0",
+  "homePage": "https://github.com/zzzu2221/SillyTavern-WeChat",
+  "auto_update": true
+}

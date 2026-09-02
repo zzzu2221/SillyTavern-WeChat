@@ -1,0 +1,12 @@
+{
+  "name": "sillytavern-wechat",
+  "version": "1.0.0",
+  "description": "微信 · WeChat for SillyTavern：仿微信聊天前端 + 朋友圈，SillyTavern 页面内扩展。",
+  "type": "module",
+  "author": "wechat-st",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "test": "node --check extension/index.js && node --check app/js/api.js"
+  }
+}

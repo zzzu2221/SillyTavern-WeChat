@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>酒馆微信</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- 页面容器 -->
+  <div id="pages">
+    <!-- 微信（会话列表） -->
+    <div class="page" id="page-chatlist">
+      <header class="page-header">
+        <div class="header-title">微信</div>
+        <div class="header-actions">
+          <button class="icon-btn" id="btn-chatlist-add" title="发起会话">＋</button>
+        </div>
+      </header>
+      <div class="page-body" id="chatlist-body"></div>
+    </div>
+
+    <!-- 通讯录 -->
+    <div class="page" id="page-contacts">
+      <header class="page-header">
+        <div class="header-title">通讯录</div>
+        <div class="header-actions">
+          <button class="icon-btn" id="btn-contacts-add" title="新朋友">＋</button>
+        </div>
+      </header>
+      <div class="page-body" id="contacts-body"></div>
+    </div>
+
+    <!-- 朋友圈 -->
+    <div class="page" id="page-moments">
+      <header class="page-header moments-header">
+        <div class="header-title" id="moments-title-label">朋友圈</div>
+        <div class="header-actions">
+          <button class="icon-btn" id="btn-moments-ai" title="AI 自动发圈">🤖</button>
+          <button class="icon-btn" id="btn-moments-add" title="发布">📷</button>
+        </div>
+      </header>
+      <div class="page-body" id="moments-body"></div>
+    </div>
+
+    <!-- 我 -->
+    <div class="page" id="page-me">
+      <header class="page-header">
+        <div class="header-title">我</div>
+      </header>
+      <div class="page-body" id="me-body"></div>
+    </div>
+
+    <!-- 聊天页 -->
+    <div class="page page-full" id="page-chat" style="display:none">
+      <header class="page-header chat-header">
+        <button class="icon-btn" id="btn-chat-back">‹</button>
+        <div class="header-title chat-title" id="chat-title">对话</div>
+        <div class="header-actions">
+          <button class="icon-btn" id="btn-chat-detail" title="角色详情">⋯</button>
+        </div>
+      </header>
+      <div class="page-body chat-body" id="chat-body"></div>
+      <div class="chat-input-bar">
+        <button class="emoji-btn" id="btn-emoji" title="表情">😊</button>
+        <div class="emoji-panel" id="emoji-panel"></div>
+        <textarea id="chat-input" rows="1" placeholder="发消息…" enterkeyhint="send"></textarea>
+        <button id="chat-send" class="send-btn">发送</button>
+      </div>
+    </div>
+
+    <!-- 角色详情页 -->
+    <div class="page page-full" id="page-detail" style="display:none">
+      <header class="page-header">
+        <button class="icon-btn" id="btn-detail-back">‹</button>
+        <div class="header-title" id="detail-title">角色详情</div>
+        <div class="header-actions"></div>
+      </header>
+      <div class="page-body" id="detail-body"></div>
+    </div>
+
+    <!-- 会话列表页（某角色全部历史会话） -->
+    <div class="page page-full" id="page-sessions" style="display:none">
+      <header class="page-header">
+        <button class="icon-btn" id="btn-sessions-back">‹</button>
+        <div class="header-title" id="sessions-title">历史会话</div>
+        <div class="header-actions">
+          <button class="icon-btn" id="btn-sessions-new">＋</button>
+        </div>
+      </header>
+      <div class="page-body" id="sessions-body"></div>
+    </div>
+
+    <!-- 新朋友页（通讯录＋入口） -->
+    <div class="page page-full" id="page-friends" style="display:none">
+      <header class="page-header">
+        <button class="icon-btn" id="btn-friends-back">‹</button>
+        <div class="header-title">新朋友</div>
+        <div class="header-actions"></div>
+      </header>
+      <div class="page-body" id="friends-body"></div>
+    </div>
+
+    <!-- 账号管理页（我页入口） -->
+    <div class="page page-full" id="page-account" style="display:none">
+      <header class="page-header">
+        <button class="icon-btn" id="btn-account-back">‹</button>
+        <div class="header-title">账号管理</div>
+        <div class="header-actions">
+          <button class="icon-btn" id="btn-account-add" title="新建账号">＋</button>
+        </div>
+      </header>
+      <div class="page-body" id="account-body"></div>
+    </div>
+  </div>
+
+  <!-- 底部 Tab -->
+  <nav class="tabbar" id="tabbar">
+    <div class="tab-item" data-tab="chatlist"><span class="tab-icon">💬</span><span class="tab-label">微信</span></div>
+    <div class="tab-item" data-tab="contacts"><span class="tab-icon">👥</span><span class="tab-label">通讯录</span></div>
+    <div class="tab-item" data-tab="moments"><span class="tab-icon">🌐</span><span class="tab-label">朋友圈</span></div>
+    <div class="tab-item" data-tab="me"><span class="tab-icon">👤</span><span class="tab-label">我</span></div>
+  </nav>
+
+  <!-- 发布朋友圈弹层 -->
+  <div class="modal-mask" id="moment-modal" style="display:none">
+    <div class="modal-card">
+      <div class="modal-title">发布朋友圈</div>
+      <div class="modal-field" id="moment-char-field">
+        <label>参考角色（AI 草稿依据哪个角色的聊天）</label>
+        <select id="moment-char"></select>
+      </div>
+      <div class="modal-field">
+        <label>文案</label>
+        <textarea id="moment-text" placeholder="这一刻的想法…" rows="3"></textarea>
+      </div>
+      <div class="modal-field">
+        <label>配图方式</label>
+        <div class="seg" id="moment-imgmode">
+          <button type="button" class="seg-btn active" data-mode="none">无图</button>
+          <button type="button" class="seg-btn" data-mode="gen">生图</button>
+          <button type="button" class="seg-btn" data-mode="upload">上传图片</button>
+        </div>
+      </div>
+      <div class="modal-field" id="moment-preset-field" style="display:none">
+        <label>生图预设</label>
+        <select id="moment-preset"><option value="">无</option></select>
+      </div>
+      <div class="modal-field" id="moment-imgprompt-field" style="display:none">
+        <label>生图提示词</label>
+        <textarea id="moment-imgprompt" placeholder="例如：1girl, cherry blossoms, sunset, cinematic lighting" rows="2"></textarea>
+      </div>
+      <div class="modal-field" id="moment-upload-field" style="display:none">
+        <label>选择图片</label>
+        <div class="upload-pick">
+          <button type="button" class="btn-plain" id="moment-upload-btn">＋ 选择图片</button>
+          <input type="file" id="moment-file" accept="image/*" style="display:none">
+          <img id="moment-file-preview" class="upload-preview" style="display:none">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-plain" id="moment-cancel">取消</button>
+        <button class="btn-plain" id="moment-ai-draft">✨ AI 生成草稿</button>
+        <button class="btn-primary" id="moment-submit">发布</button>
+      </div>
+      <div class="modal-tip" id="moment-tip"></div>
+    </div>
+  </div>
+
+  <!-- 评论输入弹层 -->
+  <div class="modal-mask" id="comment-modal" style="display:none">
+    <div class="modal-card">
+      <div class="modal-title">评论这条朋友圈</div>
+      <div class="modal-field">
+        <label>由谁评论</label>
+        <div class="seg" id="comment-who">
+          <button type="button" class="seg-btn active" data-who="char">角色</button>
+          <button type="button" class="seg-btn" data-who="me">我</button>
+        </div>
+      </div>
+      <div class="modal-field" id="comment-char-field">
+        <label>选择角色</label>
+        <select id="comment-char"></select>
+      </div>
+      <div class="modal-field">
+        <label>评论内容</label>
+        <textarea id="comment-text" rows="2" placeholder="写点评论…"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-plain" id="comment-ai">✨ AI评论</button>
+        <button class="btn-plain" id="comment-cancel">取消</button>
+        <button class="btn-primary" id="comment-submit">发送</button>
+      </div>
+      <div class="modal-tip" id="comment-tip"></div>
+    </div>
+  </div>
+
+  <!-- AI 自动发圈弹层 -->
+  <div class="modal-mask" id="ai-moment-modal" style="display:none">
+    <div class="modal-card">
+      <div class="modal-title">🤖 AI 自动发朋友圈</div>
+      <div class="modal-field">
+        <label>发布角色（仅通讯录内角色可选）</label>
+        <select id="aim-char"></select>
+      </div>
+      <div class="modal-field">
+        <label>补充灵感（可选，留空则 AI 依据最近聊天）</label>
+        <textarea id="aim-hint" rows="2" placeholder="例如：今天发生了什么？想炫耀/吐槽什么？"></textarea>
+      </div>
+      <div class="modal-field">
+        <label>AI 生成的文案（可修改）</label>
+        <textarea id="aim-text" rows="3" placeholder="点击「✨ 生成」后由 AI 自动填写"></textarea>
+      </div>
+      <div class="modal-field">
+        <label>配图方式</label>
+        <div class="seg" id="aim-imgmode">
+          <button type="button" class="seg-btn active" data-mode="none">无图</button>
+          <button type="button" class="seg-btn" data-mode="gen">AI 生图</button>
+          <button type="button" class="seg-btn" data-mode="upload">上传图片</button>
+        </div>
+      </div>
+      <div class="modal-field" id="aim-preset-field" style="display:none">
+        <label>生图预设（可选）</label>
+        <select id="aim-preset"><option value="">无</option></select>
+      </div>
+      <div class="modal-field" id="aim-img-field" style="display:none">
+        <label>配图生图提示词（可修改，留空则不带图）</label>
+        <textarea id="aim-img" rows="2" placeholder="由 AI 自动生成"></textarea>
+      </div>
+      <div class="modal-field" id="aim-upload-field" style="display:none">
+        <label>选择图片（人工编辑用）</label>
+        <div class="upload-pick">
+          <button type="button" class="btn-plain" id="aim-upload-btn">＋ 选择图片</button>
+          <input type="file" id="aim-file" accept="image/*" style="display:none">
+          <img id="aim-file-preview" class="upload-preview" style="display:none">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-plain" id="aim-cancel">取消</button>
+        <button class="btn-plain" id="aim-gen">✨ 生成草稿</button>
+        <button class="btn-primary" id="aim-publish">📤 发布</button>
+      </div>
+      <div class="modal-tip" id="aim-tip"></div>
+    </div>
+  </div>
+
+  <!-- 个人信息编辑弹层（我页） -->
+  <div class="modal-mask" id="profile-modal" style="display:none">
+    <div class="modal-card">
+      <div class="modal-title" id="profile-modal-title">个人信息</div>
+      <div class="modal-field">
+        <label>头像</label>
+        <div class="profile-avatar-pick" id="profile-avatar-pick"></div>
+        <div class="upload-pick">
+          <button type="button" class="btn-plain" id="profile-avatar-upload-btn">＋ 本地上传头像</button>
+          <input type="file" id="profile-avatar-file" accept="image/*" style="display:none">
+        </div>
+      </div>
+      <div class="modal-field"><label>名字</label><input id="profile-name" placeholder="我的名字"></div>
+      <div class="modal-field"><label>微信号</label><input id="profile-id" placeholder="wxid 或自定义"></div>
+      <div class="modal-field"><label>个性签名</label><input id="profile-sig" placeholder="个性签名"></div>
+      <div class="modal-field"><label>人设描述（AI 帮你发朋友圈时参考的「你」的设定）</label>
+        <textarea id="profile-desc" rows="3" placeholder="例如：刚入高专的新生，嘴硬心软，喜欢吐槽身边人…"></textarea>
+      </div>
+      <div class="modal-field"><label>朋友圈封面</label>
+        <input id="profile-cover" placeholder="图片地址，或下方本地上传">
+        <div class="upload-pick">
+          <button type="button" class="btn-plain" id="profile-cover-upload-btn">＋ 本地上传封面</button>
+          <input type="file" id="profile-cover-file" accept="image/*" style="display:none">
+          <img id="profile-cover-preview" class="upload-preview upload-preview-cover" style="display:none">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-plain" id="profile-cancel">取消</button>
+        <button class="btn-primary" id="profile-save">保存</button>
+      </div>
+      <div class="modal-tip" id="profile-tip"></div>
+    </div>
+  </div>
+
+  <!-- 账号编辑弹层（账号管理） -->
+  <div class="modal-mask" id="account-modal" style="display:none">
+    <div class="modal-card">
+      <div class="modal-title" id="account-modal-title">编辑账号</div>
+      <div class="modal-field"><label>名字</label><input id="acct-name" placeholder="账号名"></div>
+      <div class="modal-field"><label>头像</label>
+        <div class="profile-avatar-pick" id="acct-avatar-pick"></div>
+        <div class="upload-pick">
+          <button type="button" class="btn-plain" id="acct-avatar-upload-btn">＋ 本地上传头像</button>
+          <input type="file" id="acct-avatar-file" accept="image/*" style="display:none">
+        </div>
+      </div>
+      <div class="modal-field"><label>朋友圈封面</label>
+        <div class="upload-pick">
+          <button type="button" class="btn-plain" id="acct-cover-upload-btn">＋ 本地上传封面</button>
+          <input type="file" id="acct-cover-file" accept="image/*" style="display:none">
+          <img id="acct-cover-preview" class="upload-preview upload-preview-cover" style="display:none">
+        </div>
+      </div>
+      <div class="modal-field"><label>个性签名</label><input id="acct-sig" placeholder="个性签名"></div>
+      <div class="modal-field"><label>人设描述（AI 帮你发朋友圈/写评论时参考的「你」的设定）</label>
+        <textarea id="acct-desc" rows="3" placeholder="例如：我是刚入高专的新生，性格有点别扭但嘴硬心软，喜欢吐槽身边人，尤其看不惯五条老师…"></textarea>
+      </div>
+      <div class="modal-field"><label>关联角色与关系（和哪些角色是什么关系）</label>
+        <div class="acct-relations" id="acct-relations"></div>
+      </div>
+      <div class="modal-field"><label>世界书 / 我的设定</label>
+        <div class="wb-pick">
+          <select id="acct-wb-select"><option value="">从已导入世界书选择…</option></select>
+          <button type="button" class="btn-plain" id="acct-wb-load" style="display:none">加载所选</button>
+        </div>
+        <textarea id="acct-wb" rows="4" placeholder="选择世界书后自动填入，也可手写：例如 我是五条悟的女友…"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-plain" id="acct-cancel">取消</button>
+        <button class="btn-primary" id="acct-save">保存</button>
+      </div>
+      <div class="modal-tip" id="acct-tip"></div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
+
+  <!-- 选择关联角色弹层 -->
+  <div class="modal-mask" id="role-pick-modal" style="display:none">
+    <div class="modal-card modal-card-tall">
+      <div class="modal-title">添加关联角色</div>
+      <div class="rp-search">
+        <input id="rp-search" placeholder="搜索角色名…">
+        <select id="rp-tag"><option value="">全部分组</option></select>
+      </div>
+      <div class="rp-list" id="rp-list"></div>
+      <div class="modal-actions">
+        <button class="btn-plain" id="rp-cancel">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 世界书条目勾选弹层 -->
+  <div class="modal-mask" id="wb-entries-modal" style="display:none">
+    <div class="modal-card modal-card-tall">
+      <div class="modal-title">选择世界书条目<span id="wb-entries-name" style="font-weight:400;font-size:13px;color:#999"></span></div>
+      <div class="wb-entries-hint">勾选要启用并注入为「我的设定」的条目（其余不生效）</div>
+      <div class="wb-entries-list" id="wb-entries-list"></div>
+      <div class="modal-actions">
+        <button class="btn-plain" id="wb-entries-cancel">取消</button>
+        <button class="btn-primary" id="wb-entries-ok">载入勾选条目</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 同意新朋友时选关系弹层 -->
+  <div class="modal-mask" id="friend-rel-modal" style="display:none">
+    <div class="modal-card">
+      <div class="modal-title">添加「<span id="fr-name"></span>」为好友</div>
+      <div class="modal-field"><label>TA 与你的关系</label>
+        <select id="fr-relation"></select>
+      </div>
+      <div class="modal-field"><label>备注（可选，可写补充设定）</label>
+        <input id="fr-note" placeholder="例如：从小一起长大 / 现在在追我">
+      </div>
+      <div class="modal-actions">
+        <button class="btn-plain" id="fr-cancel">取消</button>
+        <button class="btn-primary" id="fr-ok">同意添加</button>
+      </div>
+      <div class="modal-tip" id="fr-tip"></div>
+    </div>
+  </div>
+</div>
+
+<script src="js/api.js"></script>
+<script src="js/store.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+<script src="js/contacts.js"></script>
+<script src="js/chatlist.js"></script>
+<script src="js/chat.js"></script>
+<script src="js/detail.js"></script>
+<script src="js/moments.js"></script>
+<script src="js/friends.js"></script>
+<script src="js/me.js"></script>
+</body>
+</html>

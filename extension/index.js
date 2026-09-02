@@ -1,0 +1,1420 @@
+/* ============================================================================
+ * 微信 · WeChat for SillyTavern — SillyTavern 扩展（iframe 注入式）
+ *
+ * 在酒馆页面里提供一个悬浮「微信」按钮，点击全屏打开仿微信聊天前端，
+ * 前端通过 parent.WXBRIDGE 与酒馆对接（角色/会话/聊天/生图/朋友圈）。
+ * 通讯录白名单、聊天模型、生图参数、朋友圈自动发布均可在设置面板调整。
+ *
+ * 全部酒馆能力通过 SillyTavern.getContext() 桥接（角色/CSRF 头/设置/缩略图），
+ * 不依赖 ST 内部模块作用域变量，跨版本更稳。
+ * ========================================================================== */
+import { power_user } from '../../../../power-user.js';
+import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
+(function () {
+  'use strict';
+  var LOG = '[WeChat-ST]';
+  var EXT_KEY = 'wechat-st';
+  /** AI 写朋友圈配图生图提示词的硬性规则（源自用户「总结并生图格式」世界书） */
+  var IMG_PROMPT_RULES = [
+    '1. 只写画面描述英文关键词（纯英文短标签，单行不换行），绝对不要添加画质、画风类词汇（如 masterpiece, best quality, anime style, illustration, highly detailed 等），这些由插件全局预设自动加载。',
+    '2. 关键词排序顺序固定：角色英文名称 → 年龄性别 → 发型样貌 → 穿戴细节 → 神态表情 → 身体动作 → 手部细节 → 所处环境 → 光影氛围 → 次要物品 → 画面约束。',
+    '3. 角色必须有固定人设锚点：先写该角色在《咒术回战》等原作中的英文名（如 五条悟 = gojou satoru, adult male），再写标志性外貌（如 五条悟：white short messy hair, round sunglasses slipping down the tip of nose 或 blindfold on eyes；夏油杰：geto suguru, adult male, long black half-up bun hair, black ear gauges），服饰神态动作严格贴合当前剧情。',
+    '4. 仅还原本轮剧情关键画面，不脑补、不带过往剧情。',
+    '5. 多人群像只细化 1~2 个主要角色，配角极简站位。',
+    '6. 全程规避畸形肢体、错误构图。',
+  ].join('\n');
+  // iframe 路径：从本模块地址推导，兼容任意安装目录（用户级/全局、任意文件夹名）
+  var APP_PATH = (function () {
+    try {
+      var u = new URL('../app/index.html', import.meta.url);
+      return u.pathname + u.search;
+    } catch (e) { return '/scripts/extensions/third-party/SillyTavern-WeChat/app/index.html'; }
+  })();
+  var MOMENTS_GROUP_NAME = '朋友圈';
+  var OVERLAY_ID = 'wxst-overlay';
+  var LAUNCHER_ID = 'wxst-launcher';
+  var SETTINGS_ID = 'wxst-settings';
+  var charCache = null;   // {at:timestamp, list:[...]}
+
+  function ctx() { try { return (window.SillyTavern && SillyTavern.getContext) ? SillyTavern.getContext() : null; } catch (e) { return null; } }
+  function log() { try { console.log.apply(console, [LOG].concat(Array.prototype.slice.call(arguments))); } catch (e) {} }
+  function toast(msg, kind) { try { if (window.toastr) toastr[kind || 'info'](msg, '微信'); } catch (e) { log(msg); } }
+
+  /* ---------------- 设置 ---------------- */
+  function getSettings() {
+    var c = ctx();
+    if (!c || !c.extensionSettings) return {};
+    if (!c.extensionSettings[EXT_KEY]) c.extensionSettings[EXT_KEY] = {};
+    return c.extensionSettings[EXT_KEY];
+  }
+  function saveSettings() { try { var c = ctx(); if (c && c.saveSettingsDebounced) c.saveSettingsDebounced(); } catch (e) {} }
+
+  /* ---------------- CSRF 与 ST REST ---------------- */
+  function headers() {
+    var h = { 'Content-Type': 'application/json' };
+    try { var c = ctx(); if (c && c.getRequestHeaders) Object.assign(h, c.getRequestHeaders()); } catch (e) {}
+    return h;
+  }
+
+  async function st(method, path, body) {
+    var res = await fetch(path, {
+      method: method,
+      headers: headers(),
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    var text = await res.text();
+    var data; try { data = JSON.parse(text); } catch (e) { data = text; }
+    if (!res.ok) {
+      var err = new Error(path + ' -> ' + res.status);
+      err.status = res.status; err.data = data;
+      throw err;
+    }
+    return data;
+  }
+
+  /* ---------------- 角色（文件名头像 → data URL 缓存） ---------------- */
+  async function avatarToDataURL(url) {
+    try {
+      var res = await fetch(url);
+      if (!res.ok) return '';
+      var blob = await res.blob();
+      return await new Promise(function (resolve) {
+        var fr = new FileReader();
+        fr.onload = function () { resolve(fr.result || ''); };
+        fr.onerror = function () { resolve(''); };
+        fr.readAsDataURL(blob);
+      });
+    } catch (e) { return ''; }
+  }
+
+  async function listCharacters() {
+    var now = Date.now();
+    if (charCache && now - charCache.at < 60000) return charCache.list;
+    var chars = null;
+    try { var c = ctx(); if (c && c.getCharacters) chars = await c.getCharacters(); } catch (e) {}
+    if (!chars || !chars.length) { try { chars = ctx().characters || []; } catch (e) {} }
+    var out = [];
+    var tasks = [];
+    for (var i = 0; i < (chars || []).length; i++) {
+      (function (ch) {
+        if (!ch || !ch.name) return;
+        var item = {
+          name: ch.name,
+          displayName: ch.name,
+          key: String(ch.avatar || ch.name),   // 角色唯一标识（avatar 文件名），区分同名卡
+          avatar: '',
+          avatar_file: ch.avatar || '',   // 原始文件名，供 /api/chats/* 用
+          description: ch.description || '',
+          personality: ch.personality || '',
+          scenario: ch.scenario || '',
+          greeting: ch.greeting || ch.first_mes || '',
+          alternateGreetings: Array.isArray(ch.alternate_greetings) ? ch.alternate_greetings.map(function (x) { return String(x); }) : [],
+          tag: (function () {
+            // ST 把用户手动打的 tag 存在 settings.json 的 tags(id->name) + tag_map(avatar->tag id)
+            var ids = [];
+            try {
+              var tm = ST_TAG_MAP || {};
+              var raw = tm[String(ch.avatar || '')];
+              ids = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+            } catch (e) {}
+            var names = [];
+            try {
+              var tl = ST_TAGS || [];
+              ids.filter(Boolean).forEach(function (id) {
+                var t = tl.find(function (x) { return String(x.id) === String(id); });
+                names.push(t && t.name ? String(t.name) : String(id));
+              });
+            } catch (e) {}
+            if (!names.length) {
+              // 兜底：角色卡内嵌 tags 字段
+              var t = Array.isArray(ch.tags) ? ch.tags : (ch.data && Array.isArray(ch.data.tags)) ? ch.data.tags : Array.isArray(ch.tag) ? ch.tag : [];
+              names = t.map(String);
+            }
+            return names;
+          })(),
+        };
+        out.push(item);
+        var file = ch.avatar;
+        if (file && file !== 'none') {
+          var url = file.startsWith('data:') ? file : null;
+          if (!url) { try { url = ctx().getThumbnailUrl('avatar', file); } catch (e) {} }
+          tasks.push(avatarToDataURL(url).then(function (data) { item.avatar = data; }));
+        }
+      })(chars[i]);
+    }
+    await Promise.all(tasks);
+    // 同名角色加区分后缀，用于展示（如：五条悟、五条悟 #2）
+    var nameCount = {};
+    out.forEach(function (c) { nameCount[c.name] = (nameCount[c.name] || 0) + 1; });
+    var seen = {};
+    out.forEach(function (c) {
+      if (nameCount[c.name] > 1) {
+        seen[c.name] = (seen[c.name] || 0) + 1;
+        c.displayName = c.name + (seen[c.name] > 1 ? ' #' + seen[c.name] : '');
+      } else {
+        c.displayName = c.name;
+      }
+    });
+    charCache = { at: now, list: out };
+    return out;
+  }
+
+  function whitelistOf() {
+    var s = getSettings();
+    if (!Array.isArray(s.whitelist)) return null; // null = 全部
+    return s.whitelist.map(String);
+  }
+  /** 白名单判定：key 优先，兼容旧版本按 name 存的 whitelist */
+  function isAllowed(key, name) {
+    var w = whitelistOf();
+    if (!w) return true;
+    return w.indexOf(String(key)) >= 0 || (name != null && w.indexOf(String(name)) >= 0);
+  }
+
+  /* ---------------- 聊天配置 ---------------- */
+  function chatConfig() {
+    var s = getSettings();
+    var oai = null; try { oai = ctx().chatCompletionSettings || null; } catch (e) {}
+    var over = s.chat || {};
+    return {
+      source: over.source || (oai && oai.chat_completion_source) || 'custom',
+      custom_url: over.custom_url || (oai && oai.custom_url) || 'https://api.siliconflow.cn/v1',
+      model: over.model || (oai && oai.custom_model) || '',
+      temperature: over.temperature != null ? over.temperature : 0.9,
+      max_tokens: over.max_tokens || 1024,
+    };
+  }
+
+  async function genChat(messages, opts) {
+    opts = opts || {};
+    var cfg = chatConfig();
+    var body = {
+      chat_completion_source: cfg.source,
+      custom_url: cfg.custom_url,
+      model: cfg.model,
+      messages: messages,
+      stream: false,
+      temperature: opts.temperature != null ? opts.temperature : cfg.temperature,
+      max_tokens: opts.max_tokens || cfg.max_tokens,
+    };
+    var data = await st('POST', '/api/backends/chat-completions/generate', body);
+    var content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+    if (typeof content !== 'string' || !content) throw new Error('模型未返回内容');
+    return { content: content };
+  }
+
+  /* ---------------- 生图（自填 NovelAI API / 走酒馆代理 / 智绘机继承） ---------------- */
+  function chatu8Settings() {
+    try { return ctx().extensionSettings['st-chatu8'] || null; } catch (e) { return null; }
+  }
+  /** 从智绘机读取「提示词预设」列表：[{name, prompt, neg}] */
+  function chatu8Presets() {
+    var zh = chatu8Settings();
+    if (!zh || !zh.yushe) return [];
+    var obj = zh.yushe;
+    if (typeof obj === 'string') { try { obj = JSON.parse(obj); } catch (e) { return []; } }
+    if (!obj || typeof obj !== 'object') return [];
+    var list = [];
+    Object.keys(obj).forEach(function (name) {
+      var p = obj[name] || {};
+      var fp = String(p.fixedPrompt || '').trim();
+      var fe = String(p.fixedPrompt_end || '').trim();
+      var np = String(p.negativePrompt || '').trim();
+      if (!name || (!fp && !np)) return;
+      list.push({ name: name, prompt: [fp, fe].filter(Boolean).join(', '), neg: np || undefined });
+    });
+    return list;
+  }
+  function chatu8CurrentPresetName() {
+    var zh = chatu8Settings();
+    return (zh && zh.yusheid_novelai) ? zh.yusheid_novelai : '';
+  }
+  function chatu8NegativePrompt() {
+    var presets = chatu8Presets();
+    var cur = chatu8CurrentPresetName();
+    var p = presets.find(function (x) { return x.name === cur; });
+    if (p && p.neg) return p.neg;
+    return '';
+  }
+
+  function imageConfig() {
+    var s = getSettings();
+    var zh = chatu8Settings();
+    var im = s.image || {};
+    var presets = (Array.isArray(im.presets) && im.presets.length) ? im.presets : chatu8Presets();
+    var site = (zh && zh.novelaisite) || '';
+    var apiUrlDefault = (site === '其他站点' && zh.novelaiOtherSite) || 'https://image.novelai.net/ai/generate-image';
+    return {
+      enabled: getSettings().imageEnabled !== false,
+      mode: im.mode || 'direct',   // 'direct' 直连 NovelAI API（同智绘机）；'proxy' 走酒馆代理
+      apiUrl: im.apiUrl || apiUrlDefault,
+      apiKey: im.apiKey || (zh && zh.novelaiApi) || '',
+      basePrompt: im.basePrompt || '',
+      defaultPreset: im.defaultPreset || chatu8CurrentPresetName(),
+      presets: presets,
+      scale: im.scale != null ? im.scale : (zh && zh.nai3Scale != null ? Number(zh.nai3Scale) : 10),
+      cfg_rescale: im.cfg_rescale != null ? im.cfg_rescale : (zh && zh.cfg_rescale != null ? Number(zh.cfg_rescale) : 0.18),
+      model: im.model || (zh && zh.novelaimode) || 'nai-diffusion-4-5-full',
+      width: im.width || (zh && zh.novelai_width) || 1216,
+      height: im.height || (zh && zh.novelai_height) || 832,
+      steps: im.steps || (zh && zh.novelai_steps) || 28,
+      sampler: im.sampler || (zh && zh.novelai_sampler) || 'k_euler',
+      scheduler: im.scheduler || (zh && zh.Schedule) || 'karras',
+      negative_prompt: im.negative_prompt || chatu8NegativePrompt() || 'lowres, bad anatomy, bad hands, text, error, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry',
+      sm: im.sm != null ? im.sm : (zh ? (zh.sm != null ? zh.sm : true) : true),
+      sm_dyn: im.sm_dyn != null ? im.sm_dyn : (zh ? (zh.dyn != null ? zh.dyn : true) : true),
+      decrisper: im.decrisper != null ? im.decrisper : (zh ? (zh.nai3Deceisp != null ? zh.nai3Deceisp : true) : true),
+      // 质量标签 AQT：智绘机在提示词末尾追加（默认 = 智绘机 AQT_novelai 配置；缺失时用 NovelAI Heavy 标准）
+      aqt: im.aqt != null ? im.aqt : (zh && zh.AQT_novelai ? zh.AQT_novelai : 'best quality, amazing quality, very aesthetic, absurdres'),
+    };
+  }
+
+  /** 一键把智绘机(st-chatu8)的 NovelAI 配置与预设全部复制到本扩展设置 */
+  function importFromChatu8() {
+    var zh = chatu8Settings();
+    if (!zh) throw new Error('未检测到智绘机(st-chatu8)设置');
+    var s = getSettings();
+    var presets = chatu8Presets();
+    var cur = chatu8CurrentPresetName();
+    // 站点：官网 → 直连官方；其他站点 → 自定义地址
+    var site = String(zh.novelaisite || '');
+    var apiUrl = (site === '其他站点' && zh.novelaiOtherSite)
+      ? zh.novelaiOtherSite
+      : 'https://image.novelai.net/ai/generate-image';
+    var im = {
+      mode: 'direct', // 跟随智绘机：浏览器直连，不走酒馆代理
+      apiUrl: apiUrl,
+      apiKey: zh.novelaiApi || undefined,
+      defaultPreset: cur || undefined,
+      presets: presets.length ? presets : undefined,
+      model: zh.novelaimode || undefined,
+      width: zh.novelai_width ? Number(zh.novelai_width) : undefined,
+      height: zh.novelai_height ? Number(zh.novelai_height) : undefined,
+      steps: zh.novelai_steps ? Number(zh.novelai_steps) : undefined,
+      sampler: zh.novelai_sampler || undefined,
+      scheduler: zh.Schedule || undefined,
+      negative_prompt: chatu8NegativePrompt() || undefined,
+      sm: zh.sm != null ? (String(zh.sm) === 'true' || zh.sm === true) : undefined,
+      sm_dyn: zh.dyn != null ? (String(zh.dyn) === 'true' || zh.dyn === true) : undefined,
+      decrisper: zh.nai3Deceisp != null ? (String(zh.nai3Deceisp) === 'true' || zh.nai3Deceisp === true) : undefined,
+      scale: zh.nai3Scale != null ? Number(zh.nai3Scale) : undefined,
+      cfg_rescale: zh.cfg_rescale != null ? Number(zh.cfg_rescale) : undefined,
+      aqt: zh.AQT_novelai ? zh.AQT_novelai : undefined,
+    };
+    Object.keys(im).forEach(function (k) { if (im[k] === undefined) delete im[k]; });
+    s.image = im;
+    saveSettings();
+    return { imported: true, mode: im.mode, apiUrl: apiUrl, presets: presets.map(function (p) { return p.name; }), defaultPreset: cur, hasKey: !!zh.novelaiApi, scale: im.scale, cfg_rescale: im.cfg_rescale };
+  }
+
+  /** 找到命名的预设（没有则 null） */
+  function findPreset(name) {
+    var im = imageConfig();
+    if (!name || !im.presets.length) return null;
+    for (var i = 0; i < im.presets.length; i++) {
+      if (im.presets[i] && im.presets[i].name === name) return im.presets[i];
+    }
+    return null;
+  }
+
+  /** 拼接最终正向提示词（对齐智绘机：基础正面 + 预设固定提示词 + 剧情词 + 质量标签 AQT，并做 tag 去重） */
+  function composePrompt(prompt, presetName) {
+    var im = imageConfig();
+    var parts = [];
+    if (im.basePrompt && String(im.basePrompt).trim()) parts.push(String(im.basePrompt).trim());
+    var name = presetName || im.defaultPreset || '';
+    var pre = name ? findPreset(name) : null;
+    if (pre && pre.prompt && String(pre.prompt).trim()) parts.push(String(pre.prompt).trim());
+    if (pre && pre.promptEnd && String(pre.promptEnd).trim()) parts.push(String(pre.promptEnd).trim());
+    if (prompt && String(prompt).trim()) parts.push(String(prompt).trim());
+    if (im.aqt && String(im.aqt).trim()) parts.push(String(im.aqt).trim());
+    return dedupeTags(parts).join(', ');
+  }
+
+  /** 去重：按英文 tag 归一化后去除重复片段（智绘机会做 tag 去重） */
+  function dedupeTags(parts) {
+    var seen = {};
+    var out = [];
+    var joined = parts.filter(Boolean).join(', ');
+    // 按逗号切分 tag（保留 :: 加权结构），逐段去重
+    var segs = String(joined).split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    for (var i = 0; i < segs.length; i++) {
+      var key = segs[i].replace(/\s+/g, ' ').toLowerCase();
+      if (key && seen[key]) continue;
+      seen[key] = 1;
+      out.push(segs[i]);
+    }
+    return out;
+  }
+
+  async function ensureNovelKey() {
+    try {
+      var zh = chatu8Settings();
+      if (zh && zh.novelaiApi && !getSettings().skipKeySync) {
+        await st('POST', '/api/secrets/write', { key: 'api_key_novel', value: zh.novelaiApi, label: 'st-chatu8 同步' });
+        log('已同步 api_key_novel（来自智绘机）');
+      }
+    } catch (e) { log('api_key_novel 同步跳过:', e.message); }
+  }
+
+  /** 解压 zip，取第一张 PNG 的 base64（无头 data: 前缀） */
+  async function unzipFirstPngToBase64(buf) {
+    // 优先用 ST 全局 JSZip
+    var JSZipLib = null;
+    try { JSZipLib = (typeof window !== 'undefined' && window.JSZip) || null; } catch (e) {}
+    if (JSZipLib && typeof JSZipLib.loadAsync === 'function') {
+      var zip = await JSZipLib.loadAsync(buf);
+      var files = zip.files || {};
+      var names = Object.keys(files).filter(function (n) { return /\.png$/i.test(n); });
+      if (!names.length) throw new Error('生图响应 zip 中没有 PNG');
+      var blob = await files[names[0]].async('blob');
+      var ab = await blob.arrayBuffer();
+      return bytesToBase64(new Uint8Array(ab));
+    }
+    // 兜底：手写 zip 单文件解析 + deflate-raw 解压
+    return unzipFirstPngRaw(buf);
+  }
+
+  function bytesToBase64(u8) {
+    var CHUNK = 0x8000;
+    var out = [];
+    for (var i = 0; i < u8.length; i += CHUNK) {
+      out.push(String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK)));
+    }
+    return btoa(out.join(''));
+  }
+
+  async function unzipFirstPngRaw(buf) {
+    var u8 = new Uint8Array(buf);
+    var dv = new DataView(buf);
+    var off = 0;
+    // 遍历本地文件头 PK\x03\x04
+    while (off + 4 <= u8.length) {
+      if (u8[off] === 0x50 && u8[off + 1] === 0x4b && u8[off + 2] === 0x03 && u8[off + 3] === 0x04) {
+        var method = dv.getUint16(off + 8, true);
+        var compSize = dv.getUint32(off + 18, true);
+        var nameLen = dv.getUint16(off + 26, true);
+        var extraLen = dv.getUint16(off + 28, true);
+        var dataStart = off + 30 + nameLen + extraLen;
+        var name = '';
+        for (var i = 0; i < nameLen; i++) name += String.fromCharCode(u8[off + 30 + i]);
+        if (/\.png$/i.test(name) && compSize > 0) {
+          var compressed = u8.subarray(dataStart, dataStart + compSize);
+          var raw = await inflateRaw(compressed);
+          return bytesToBase64(raw);
+        }
+        off = dataStart + compSize;
+      } else {
+        off++;
+      }
+    }
+    throw new Error('无法解析生图响应 zip');
+  }
+
+  async function inflateRaw(compressed) {
+    if (typeof DecompressionStream === 'undefined') throw new Error('浏览器不支持 deflate 解压');
+    var ds = new DecompressionStream('deflate-raw');
+    var stream = new Blob([compressed]).stream().pipeThrough(ds);
+    var ab = await new Response(stream).arrayBuffer();
+    return new Uint8Array(ab);
+  }
+
+  /** 直连 NovelAI API 生图（payload 结构与智绘机成功请求一致） */
+  async function genImageDirect(args) {
+    var im = imageConfig();
+    var prompt = composePrompt(args.prompt, args.preset);
+    var key = im.apiKey || '';
+    if (!key) throw new Error('未填写 NovelAI API Key（设置 → 生图）');
+    var seed = (args.seed != null && args.seed >= 0) ? args.seed : Math.floor(Math.random() * 2147483647);
+    var negative = args.negative_prompt || im.negative_prompt || '';
+    var model = args.model || im.model;
+    // NAI 4.5 系列：不支持 SM/SMEA，payload 中不携带 sm/sm_dyn（与智绘机 4.5 请求一致），否则服务端 500
+    var is45 = String(model).indexOf('4-5') >= 0 || String(model).indexOf('4.5') >= 0;
+    // skip_cfg_above_sigma：智绘机按 模型/分辨率 计算（4.5 全尺寸 → 58）
+    var skipCfg = is45 ? 58 : 0;
+    var cap = { base_caption: prompt, char_captions: [] };
+    var ncap = { base_caption: negative, char_captions: [] };
+    var body = {
+      input: prompt,
+      model: model,
+      parameters: {
+        params_version: 3,
+        negative_prompt: negative,
+        height: args.height || im.height,
+        width: args.width || im.width,
+        scale: args.scale != null ? args.scale : im.scale,
+        cfg_rescale: args.cfg_rescale != null ? args.cfg_rescale : im.cfg_rescale,
+        sampler: args.sampler || im.sampler,
+        steps: args.steps || im.steps,
+        seed: seed,
+        n_samples: 1,
+        noise_schedule: args.scheduler || im.scheduler,
+        autoSmea: false,
+        normalize_reference_strength_multiple: false,
+        inpaintImg2ImgStrength: 1,
+        ucPreset: 3,
+        qualityToggle: false,
+        add_original_image: true,
+        controlnet_strength: 1,
+        dynamic_thresholding: false,
+        legacy: false,
+        legacy_uc: false,
+        legacy_v3_extend: false,
+        skip_cfg_above_sigma: skipCfg,
+        use_coords: false,
+        characterPrompts: [],
+        reference_strength_multiple: [],
+        reference_image_multiple_cached: [],
+        reference_information_extracted_multiple: [],
+        v4_negative_prompt: { caption: ncap, legacy_uc: false },
+        v4_prompt: { caption: cap, use_coords: false, use_order: true },
+      },
+    };
+    var res = await fetch(im.apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      var errText = '';
+      try { errText = (await res.text()).slice(0, 200); } catch (e) {}
+      throw new Error('NovelAI ' + res.status + (errText ? ' ' + errText : ''));
+    }
+    var buf = await res.arrayBuffer();
+    var b64 = await unzipFirstPngToBase64(buf);
+    return { url: 'data:image/png;base64,' + b64 };
+  }
+
+  async function genImage(args) {
+    args = args || {};
+    var im = imageConfig();
+    if (im.enabled === false && !args.force) throw new Error('生图已关闭（设置 → 生图开关）');
+    if (im.mode === 'direct') {
+      return genImageDirect(args);
+    }
+    // 走酒馆 NovelAI 代理
+    await ensureNovelKey();
+    var body = {
+      prompt: composePrompt(args.prompt, args.preset),
+      negative_prompt: args.negative_prompt || im.negative_prompt,
+      model: args.model || im.model,
+      width: args.width || im.width,
+      height: args.height || im.height,
+      steps: args.steps || im.steps,
+      sampler: args.sampler || im.sampler,
+      scheduler: args.scheduler || im.scheduler,
+      sm: args.sm != null ? args.sm : im.sm,
+      sm_dyn: args.sm_dyn != null ? args.sm_dyn : im.sm_dyn,
+      decrisper: args.decrisper != null ? args.decrisper : im.decrisper,
+      seed: args.seed >= 0 ? args.seed : -1,
+    };
+    var data = await st('POST', '/api/novelai/generate-image', body);
+    if (typeof data === 'string' && data.length > 100) {
+      return { url: 'data:image/png;base64,' + data };
+    }
+    throw new Error('生图返回异常');
+  }
+
+  /* ---------------- 朋友圈（酒馆群组存储） ---------------- */
+  async function ensureMomentsGroup() {
+    var s = getSettings();
+    if (s.momentsGroupId) {
+      try {
+        var groups0 = await st('POST', '/api/groups/all', {});
+        var g0 = (groups0 || []).find(function (g) { return String(g.id) === String(s.momentsGroupId); });
+        if (g0) return g0;
+      } catch (e) {}
+    }
+    var groups = await st('POST', '/api/groups/all', {});
+    var byName = (groups || []).find(function (g) { return g.name === MOMENTS_GROUP_NAME; });
+    if (byName) { s.momentsGroupId = String(byName.id); saveSettings(); return byName; }
+    var chars = await listCharacters();
+    var members = [];
+    var allChars = null; try { allChars = ctx().characters || []; } catch (e) {}
+    for (var i = 0; i < (allChars || []).length; i++) {
+      var a = allChars[i] && allChars[i].avatar;
+      if (a && a !== 'none') members.push(a);
+    }
+    if (!members.length) members = ['none'];
+    var created = await st('POST', '/api/groups/create', {
+      name: MOMENTS_GROUP_NAME,
+      members: members,
+      allow_self_responses: false,
+      activation_strategy: 0,
+      generation_mode: 0,
+      disabled_members: [],
+      fav: false,
+      chat_id: String(Date.now()),
+      chats: [],
+    });
+    s.momentsGroupId = String(created.id);
+    saveSettings();
+    return created;
+  }
+
+  async function getMomentsChat() {
+    var g = await ensureMomentsGroup();
+    var chat = await st('POST', '/api/chats/group/get', { id: g.id });
+    return { group: g, chat: Array.isArray(chat) ? chat : [] };
+  }
+  async function saveMomentsChat(g, chat) {
+    return st('POST', '/api/chats/group/save', { id: g.id, chat: chat, force: true });
+  }
+
+  function nowIso() { return new Date().toISOString(); }
+
+  function parseTagFields(mes) {
+    var fields = {};
+    var body = String(mes).replace(/^【朋友圈动态】|^【朋友圈评论】/, '').trim();
+    // img= 的值可能是 data URL（含分号），特殊处理：取到行尾
+    var imgMatch = body.match(/;img=([\s\S]*)$/);
+    if (imgMatch) {
+      body = body.replace(/;img=[\s\S]*$/, '');
+      fields.img = imgMatch[1].trim();
+    }
+    var segs = body.split(';');
+    for (var i = 0; i < segs.length; i++) {
+      var seg = segs[i];
+      var idx = seg.indexOf('=');
+      if (idx > 0) {
+        var k = seg.slice(0, idx).trim();
+        var v = seg.slice(idx + 1).trim();
+        if (k && !(k in fields)) fields[k] = v;
+      }
+    }
+    return fields;
+  }
+
+  function parseMoments(chat) {
+    var posts = [];
+    var commentsByPost = {};
+    var order = [];
+    (chat || []).forEach(function (m) {
+      var mes = (m.mes || '').trim();
+      if (mes.indexOf('【朋友圈动态】') === 0) {
+        var f = parseTagFields(mes);
+        var post = {
+          id: f.id || ('p' + order.length),
+          character: f['角色'] || m.name || '未知角色',
+          key: f.key || '',
+          time: f['时间'] || m.send_date || '',
+          text: f['正文'] || '',
+          img: f.img || '',
+          rawIndex: posts.length,
+        };
+        posts.push(post);
+        order.push(post.id);
+        commentsByPost[post.id] = [];
+      } else if (mes.indexOf('【朋友圈评论】') === 0) {
+        var f2 = parseTagFields(mes);
+        var pid = f2['动态'] || '';
+        var comment = {
+          id: 'c' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+          postId: pid,
+          character: f2['角色'] || m.name || '未知角色',
+          key: f2.key || '',
+          time: f2['时间'] || m.send_date || '',
+          text: f2['评论'] || '',
+        };
+        if (!commentsByPost[pid]) commentsByPost[pid] = [];
+        commentsByPost[pid].push(comment);
+      }
+    });
+    return posts.map(function (p) {
+      return { id: p.id, character: p.character, key: p.key, time: p.time, text: p.text, img: p.img, comments: commentsByPost[p.id] || [] };
+    }).sort(function (a, b) { return new Date(b.time || 0) - new Date(a.time || 0); });  // 最新在上
+  }
+
+  async function publishMoment(args) {
+    args = args || {};
+    if (!args.character || !args.text) throw new Error('角色与正文不能为空');
+    var displayName = args.characterName || args.character;
+    var g = await ensureMomentsGroup();
+    var imgUrl = null;
+    if (args.imgData && String(args.imgData).trim()) {
+      // 本地上传图片：直接存 base64
+      imgUrl = String(args.imgData).trim();
+    } else if (args.imagePrompt && String(args.imagePrompt).trim()) {
+      var r = await genImage({ prompt: String(args.imagePrompt).trim(), preset: args.preset, force: !!args.force });
+      imgUrl = r.url;
+    }
+    var id = 'm' + Date.now() + Math.random().toString(16).slice(2, 8);
+    var parts = ['【朋友圈动态】', 'id=' + id + ';', '角色=' + displayName + ';', 'key=' + args.character + ';', '时间=' + nowIso() + ';', '正文=' + args.text];
+    if (imgUrl) parts.push(';img=' + imgUrl);
+    var mes = parts.join('');
+    var mesObj = { name: displayName, is_user: true, is_system: false, send_date: nowIso(), mes: mes, extra: { id: id, api: 'moments', model: 'wechat-st' } };
+    var chat = (await getMomentsChat()).chat;
+    chat.push(mesObj);
+    await saveMomentsChat(g, chat);
+    return { id: id, imgUrl: imgUrl };
+  }
+
+  async function addComment(args) {
+    args = args || {};
+    if (!args.momentId || !args.character || !args.text) throw new Error('缺少参数');
+    var displayName = args.characterName || args.character;
+    var g = await ensureMomentsGroup();
+    var mes = '【朋友圈评论】动态=' + args.momentId + ';角色=' + displayName + ';key=' + args.character + ';时间=' + nowIso() + ';评论=' + args.text;
+    var mesObj = { name: displayName, is_user: true, is_system: false, send_date: nowIso(), mes: mes, extra: { id: 'c' + Date.now(), api: 'moments', model: 'wechat-st' } };
+    var chat = (await getMomentsChat()).chat;
+    chat.push(mesObj);
+    await saveMomentsChat(g, chat);
+    return { ok: true };
+  }
+
+  /** 删除一条朋友圈动态（按动态 id 匹配【朋友圈动态】消息，并连带删除其下的评论） */
+  async function deleteMoment(momentId) {
+    if (!momentId) throw new Error('缺少动态 id');
+    var g = await ensureMomentsGroup();
+    var r = await getMomentsChat();
+    var chat = r.chat;
+    var kept = chat.filter(function (m) {
+      var mes = String(m.mes || '').trim();
+      if (mes.indexOf('【朋友圈动态】') === 0) {
+        var f = parseTagFields(mes);
+        return f.id !== momentId;
+      }
+      if (mes.indexOf('【朋友圈评论】') === 0) {
+        var f2 = parseTagFields(mes);
+        return f2['动态'] !== momentId;
+      }
+      return true;
+    });
+    if (kept.length === chat.length) throw new Error('未找到该动态');
+    await saveMomentsChat(g, kept);
+    return { ok: true };
+  }
+
+  /** 删除一条评论（按动态 id + 时间戳 + 角色 key 定位） */
+  async function deleteComment(momentId, commentTime, commentKey) {
+    if (!momentId) throw new Error('缺少参数');
+    var g = await ensureMomentsGroup();
+    var r = await getMomentsChat();
+    var chat = r.chat;
+    var kept = chat.filter(function (m) {
+      var mes = String(m.mes || '').trim();
+      if (mes.indexOf('【朋友圈评论】') !== 0) return true;
+      var f = parseTagFields(mes);
+      if (f['动态'] !== momentId) return true;
+      if (commentTime && f['时间'] === commentTime && f.key === commentKey) return false;
+      return true;
+    });
+    if (kept.length === chat.length) throw new Error('未找到该评论');
+    await saveMomentsChat(g, kept);
+    return { ok: true };
+  }
+
+  async function aiComment(args) {
+    args = args || {};
+    if (!args.momentId || !args.character) throw new Error('缺少参数');
+    var displayName = args.characterName || args.character;
+    var charDesc = '';
+    var chars = await listCharacters();
+    var c = chars.find(function (x) { return x.key === args.character || x.name === args.character; });
+    if (c && c.description) charDesc = c.description;
+    if (c && c.personality) charDesc += (charDesc ? '\n' : '') + c.personality;
+    var prompt = [
+      args.isMe
+        ? '你是微信朋友圈里的「' + displayName + '」（也就是用户本人/玩家），正在朋友圈里评论好友的动态。'
+        : '你是「' + displayName + '」，正在微信朋友圈里评论好友的动态。你的名字就叫「' + displayName + '」，任何情况下都不要喊错自己的名字、不要自称或被当成其他角色。',
+      args.isMe ? '' : (charDesc ? '你的性格设定：' + charDesc : ''),
+      args.relation ? '你与这位好友的关系：' + args.relation + '（评论语气要贴合这层关系）' : '',
+      '好友朋友圈内容：' + (args.momentText || '(无正文)'),
+      '务必围绕上面这条朋友圈内容本身来评论（内容相关、真实合理），不要跑题，不要编造朋友圈里没有发生的事，不要张冠李戴、不要喊错名字。',
+      '请以「' + displayName + '」的口吻写一条简短的中文评论（30字以内），口语化、符合人设，不要使用任何标记符号，不要加引号，只输出评论内容本身。',
+    ].filter(Boolean).join('\n');
+    var reply = await genChat([
+      { role: 'system', content: '你是朋友圈评论助手。' },
+      { role: 'user', content: prompt },
+    ], { temperature: 1.0, max_tokens: 200 });
+    var text = String(reply.content || '').trim().replace(/^[「"'“”\s]+|[」"'“”\s]+$/g, '');
+    return { text: text };
+  }
+
+  /* ---- AI 自动朋友圈：结合最近聊天，生成文案 + 生图提示词 ---- */
+  async function genAutoMoment(args) {
+    args = args || {};
+    var character = args.character;
+    var displayName = args.characterName || character;
+    if (!character) throw new Error('请选择角色');
+    var c = (await listCharacters()).find(function (x) { return x.key === character || x.name === character; });
+    var persona = [];
+    if (args.asMe) {
+      if (args.meDesc) persona.push('你的身份（玩家本人）：' + args.meDesc);
+    } else {
+      if (c && c.description) persona.push('人设：' + c.description);
+      if (c && c.personality) persona.push('性格：' + c.personality);
+    }
+    var meName = args.meName || '我';
+    var chatStr = Array.isArray(args.recentChat) && args.recentChat.length
+      ? args.recentChat.map(function (m) { return (m.is_user ? meName : displayName) + '：' + String(m.mes || ''); }).join('\n')
+      : '(暂无最近聊天记录)';
+    var imgTagLine = args.imgTag
+      ? '该角色已配置的生图标签（必须原样放在提示词开头，作为固定锚点，用于保证画风/形象一致）：' + args.imgTag
+      : '';
+    var prompt = [
+      args.asMe
+        ? '你是微信朋友圈用户本人「' + meName + '」（玩家），现在想发一条朋友圈，内容围绕你与角色「' + displayName + '」的日常/刚才的聊天展开。'
+        : '你正在扮演「' + displayName + '」，帮「' + displayName + '」发一条微信朋友圈。你的名字是「' + displayName + '」，不要喊错自己的名字，也不要混入或扮演其他角色。',
+      persona.join('\n'),
+      '最近聊天：\n' + chatStr,
+      args.hint ? '用户补充：' + args.hint : '',
+      '请' + (args.asMe
+        ? '以你自己（玩家「' + meName + '」）的第一人称口吻写：1) 一条中文朋友圈正文（口语化、像一个真实的人在发朋友圈，30~60字）；2) 一条用于配图的英文生图提示词（30词以内）。注意：你是玩家本人，绝对不要以「' + displayName + '」或其他角色的身份/口吻发朋友圈。'
+        : '以「' + displayName + '」的口吻写：1) 一条中文朋友圈正文（口语化、符合人设，30~60字）；2) 一条用于配图的英文生图提示词（30词以内）。'),
+      '配图英文生图提示词必须严格遵守以下格式规则：',
+      IMG_PROMPT_RULES,
+      imgTagLine,
+      '只输出 JSON：{"text":"中文朋友圈正文","imgPrompt":"english image prompt"}',
+    ].filter(Boolean).join('\n');
+    var reply = await genChat([
+      { role: 'system', content: '你是朋友圈内容策划助手，只输出合法 JSON。' },
+      { role: 'user', content: prompt },
+    ], { temperature: 1.0, max_tokens: 300 });
+    var content = String(reply.content || '').trim();
+    var jsonText = content.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    var obj = null;
+    try { obj = JSON.parse(jsonText); } catch (e) {}
+    if (!obj || !obj.text) {
+      var tm = content.match(/["']?text["']?\s*[:：]\s*["']([^"']+)["']/);
+      var im = content.match(/["']?imgPrompt["']?\s*[:：]\s*["']([^"']+)["']/);
+      obj = { text: tm ? tm[1] : content.slice(0, 60), imgPrompt: im ? im[1] : '' };
+    }
+    return { text: String(obj.text || '').trim(), imgPrompt: String(obj.imgPrompt || '').trim() };
+  }
+
+  /* ---- 酒馆用户设定（User Persona）与世界书 ---- */
+  async function listPersonas() {
+    var personas = (power_user && power_user.personas) || {};
+    var descs = (power_user && power_user.persona_descriptions) || {};
+    var out = [];
+    for (var id in personas) {
+      var d = descs[id] || {};
+      var avatar = '';
+      try { avatar = await avatarToDataURL('User Avatars/' + id); } catch (e) {}
+      out.push({
+        id: id,
+        name: String(personas[id] || ''),
+        description: String(d.description || d.title || ''),
+        avatar: avatar,
+        isDefault: (power_user && power_user.default_persona) === id,
+      });
+    }
+    return out;
+  }
+  async function listWorldInfos() {
+    var data = await st('POST', '/api/worldinfo/list', {});
+    return (Array.isArray(data) ? data : []).map(function (w) { return { id: w.file_id, name: w.name }; });
+  }
+  async function getWorldInfoText(fileId) {
+    if (!fileId) return '';
+    var data = await st('POST', '/api/worldinfo/get', { name: fileId });
+    var raw = (data && data.entries) || [];
+    var entries = Array.isArray(raw) ? raw : Object.keys(raw).map(function (k) { return raw[k]; });
+    return entries.map(function (e) { return e.content || ''; }).filter(Boolean).join('\n');
+  }
+  async function getWorldInfoEntries(fileId) {
+    if (!fileId) return [];
+    var data = await st('POST', '/api/worldinfo/get', { name: fileId });
+    var raw = (data && data.entries) || [];
+    var entries = Array.isArray(raw) ? raw : Object.keys(raw).map(function (k) { return raw[k]; });
+    return entries.map(function (e) {
+      return { id: e.uid, comment: e.comment || '', content: e.content || '', enabled: e.disable !== true && e.enabled !== false };
+    });
+  }
+
+  /* ---------------- 会话文件（读 / 存 / 删） ---------------- */
+  async function getChat(avatar, file) {
+    // 先按指定 avatar 读
+    try {
+      var data = await st('POST', '/api/chats/get', { avatar_url: avatar, file_name: file });
+      if (Array.isArray(data) && data.length) return data;
+    } catch (e) { /* 落到下面扫描 */ }
+    // 指定目录没有/为空时，扫描全部角色目录（兼容旧版本把会话存到其它同名卡目录的情况）
+    var chars = await listCharacters();
+    for (var i = 0; i < chars.length; i++) {
+      var av = chars[i].avatar_file;
+      if (!av || av === avatar) continue;
+      try {
+        var d2 = await st('POST', '/api/chats/get', { avatar_url: av, file_name: file });
+        if (Array.isArray(d2) && d2.length) return d2;
+      } catch (e2) { /* 继续扫 */ }
+    }
+    return [];
+  }
+  async function saveChat(avatar, file, chat) {
+    return st('POST', '/api/chats/save', { avatar_url: avatar, file_name: file, chat: chat, force: true });
+  }
+  async function deleteChat(avatar, file) {
+    // 先按指定 avatar 删除
+    try {
+      var r = await st('POST', '/api/chats/delete', { avatar_url: avatar, chatfile: file });
+      if (r && r.ok) return r;
+    } catch (e) { /* 落到下面扫描 */ }
+    // 指定目录没有时，扫描全部角色目录（兼容旧版本把会话存到其它同名卡目录的情况）
+    var chars = await listCharacters();
+    for (var i = 0; i < chars.length; i++) {
+      var av = chars[i].avatar_file;
+      if (!av || av === avatar) continue;
+      try {
+        var r2 = await st('POST', '/api/chats/delete', { avatar_url: av, chatfile: file });
+        if (r2 && r2.ok) return r2;
+      } catch (e2) { /* 继续扫 */ }
+    }
+    // 都没找到文件：视为删除成功（本地记录照删，避免卡死）
+    return { ok: true, skipped: true };
+  }
+
+  /* ---------------- 运行时配置 ---------------- */
+  async function getConfig() {
+    var im = imageConfig();
+    var cc = chatConfig();
+    var w = whitelistOf();
+    var cfg = {
+      stUrl: location.origin,
+      imageEnabled: im.enabled,
+      imageModel: im.model,
+      imageMode: im.mode,
+      imagePresets: im.presets.map(function (p) { return p && p.name; }).filter(Boolean),
+      imageDefaultPreset: im.defaultPreset || '',
+      chatModel: cc.model,
+      whitelist: w,
+      autoWhitelistTag: String(getSettings().autoWhitelistTag || '').trim(),
+      whitelistExcluded: Array.isArray(getSettings().whitelistExcluded) ? getSettings().whitelistExcluded.map(String) : [],
+      autoPost: !!getSettings().autoPost,
+      autoComment: !!getSettings().autoComment,
+      autoCommentN: getSettings().autoCommentN || 2,
+      chatBg: getSettings().chatBg || '',
+      showFab: getSettings().showFab !== false,
+      isExtension: true,
+    };
+    try {
+      var g = await ensureMomentsGroup();
+      cfg.momentsGroup = { id: g.id, name: g.name };
+    } catch (e) { log('获取朋友圈群组失败:', e.message); }
+    return cfg;
+  }
+
+  /* =============================== 悬浮按钮 + 全屏 App =============================== */
+
+  function applyFabPos(btn) {
+    var s = getSettings();
+    var p = s.fabPos;
+    var w = window.innerWidth, h = window.innerHeight;
+    var bw = btn.offsetWidth || 52, bh = btn.offsetHeight || 52;
+    var cx = Math.max(4, Math.round((w - bw) / 2));
+    var cy = Math.max(4, Math.round((h - bh) / 2));
+    if (p && typeof p.x === 'number' && typeof p.y === 'number' && p.x <= w - bw && p.y <= h - bh) {
+      // 存储位置当前仍在视口内：直接沿用
+      btn.style.left = Math.max(0, p.x) + 'px';
+      btn.style.top = Math.max(0, p.y) + 'px';
+    } else {
+      // 无记忆位置 / 位置已超出当前视口（换设备或窗口变小）：重置居中
+      btn.style.left = cx + 'px';
+      btn.style.top = cy + 'px';
+    }
+    btn.style.right = 'auto';
+    btn.style.bottom = 'auto';
+  }
+
+  /** 悬浮按钮：长按/拖拽移动，短按打开 */
+  function enableFabDrag(btn) {
+    var drag = { active: false, moved: false, sx: 0, sy: 0, ox: 0, oy: 0 };
+    function down(e) {
+      drag.active = true; drag.moved = false;
+      drag.sx = e.clientX; drag.sy = e.clientY;
+      var r = btn.getBoundingClientRect();
+      drag.ox = r.left; drag.oy = r.top;
+      if (btn.setPointerCapture) { try { btn.setPointerCapture(e.pointerId); } catch (err) {} }
+    }
+    function move(e) {
+      if (!drag.active) return;
+      var dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+      if (!drag.moved && (Math.abs(dx) + Math.abs(dy)) > 6) drag.moved = true;
+      if (!drag.moved) return;
+      if (e.preventDefault) e.preventDefault();
+      var x = Math.max(4, Math.min(window.innerWidth - btn.offsetWidth - 4, drag.ox + dx));
+      var y = Math.max(4, Math.min(window.innerHeight - btn.offsetHeight - 4, drag.oy + dy));
+      btn.style.left = x + 'px';
+      btn.style.top = y + 'px';
+      btn.style.right = 'auto';
+      btn.style.bottom = 'auto';
+    }
+    function end() {
+      if (!drag.active) return;
+      drag.active = false;
+      if (drag.moved) {
+        var s = getSettings();
+        var r = btn.getBoundingClientRect();
+        s.fabPos = { x: Math.round(r.left), y: Math.round(r.top) };
+        saveSettings();
+      }
+    }
+    btn.addEventListener('pointerdown', down);
+    btn.addEventListener('pointermove', move);
+    btn.addEventListener('pointerup', end);
+    btn.addEventListener('pointercancel', end);
+    // 拖动后抑制 click 打开
+    btn.addEventListener('click', function (e) {
+      if (drag.moved) { e.preventDefault(); e.stopPropagation(); }
+    });
+  }
+
+  function buildLauncher() {
+    if (document.getElementById(LAUNCHER_ID)) return;
+    if (getSettings().showFab === false) return; // 用户关闭悬浮按钮
+    var btn = document.createElement('div');
+    btn.id = LAUNCHER_ID;
+    btn.title = '打开微信';
+    btn.innerHTML = '<span class="wxst-fab-icon">💬</span>';
+    btn.addEventListener('click', function () { openApp(); });
+    document.body.appendChild(btn);
+    applyFabPos(btn);
+    enableFabDrag(btn);
+  }
+
+  /** 在酒馆顶部「扩展」菜单加一个微信入口（即使悬浮按钮关闭也能打开） */
+  function buildMenuEntry() {
+    try {
+      if (document.getElementById('wxst-menu-item')) return;
+      var menu = document.getElementById('extensionsMenu');
+      if (!menu) return;
+      var item = document.createElement('div');
+      item.id = 'wxst-menu-item';
+      item.className = 'list-group-item';
+      item.style.cssText = 'cursor:pointer;padding:8px 12px;display:flex;align-items:center;gap:8px;color:#fff;';
+      item.innerHTML = '<span>💬</span><span>微信 · 打开</span>';
+      item.onclick = function (e) {
+        try {
+          if (e) { e.preventDefault(); e.stopPropagation(); }
+          openApp();
+        } catch (err) { log('打开微信失败:', err && err.message); }
+        // 收起下拉
+        var dd = document.getElementById('extensionsMenu');
+        if (dd && window.jQuery) { try { jQuery(dd).fadeOut(100); } catch (err2) {} }
+      };
+      menu.appendChild(item);
+    } catch (e) { log('构建扩展菜单入口失败:', e.message); }
+  }
+
+  /** 按「启用」总开关 + 悬浮窗开关，统一显示/隐藏 FAB 与菜单入口 */
+  function applyEnabled() {
+    var on = getSettings().enabled !== false;
+    var fab = document.getElementById(LAUNCHER_ID);
+    if (!on) {
+      if (fab) fab.remove();
+      var mi = document.getElementById('wxst-menu-item');
+      if (mi) mi.remove();
+      return;
+    }
+    if (getSettings().showFab === false) {
+      if (fab) fab.remove();
+    } else if (!fab) {
+      buildLauncher();
+    }
+    if (!document.getElementById('wxst-menu-item')) buildMenuEntry();
+  }
+
+  /** 在酒馆「扩展程序」设置页注册微信配置块（含悬浮窗开关） */
+  function ensureSettingsPanel() {
+    try {
+      var host = document.getElementById('extensions_settings') || document.getElementById('extensions_settings2');
+      if (!host) return false;
+      if (document.getElementById('wxst-ext-drawer')) return true;
+      var s = getSettings();
+      var wrap = document.createElement('div');
+      wrap.id = 'wxst-ext-drawer';
+      wrap.innerHTML =
+        '<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header">' +
+          '<b><span class="fa-solid fa-comments" style="margin-right:6px"></span>微信 · WeChat for SillyTavern</b>' +
+          '<div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>' +
+          '<div class="inline-drawer-content">' +
+            '<label class="checkbox_label"><input type="checkbox" id="wxst-cfg-enable"><span><b>启用扩展</b>（关闭后悬浮按钮与菜单入口隐藏）</span></label>' +
+            '<label class="checkbox_label" style="margin-top:6px"><input type="checkbox" id="wxst-cfg-fab"><span><b>显示悬浮窗按钮</b>（右下角 💬）</span></label>' +
+            '<div class="menu_button menu_button_icon interactable" id="wxst-cfg-open" style="width:100%;justify-content:center;margin-top:8px"><span class="fa-solid fa-comments"></span><span>打开微信</span></div>' +
+            '<div class="menu_button menu_button_icon interactable" id="wxst-cfg-settings" style="width:100%;justify-content:center;margin-top:6px"><span class="fa-solid fa-gear"></span><span>打开完整设置</span></div>' +
+          '</div></div>';
+      host.appendChild(wrap);
+      // 展开/收起交给 ST 原生 inline-drawer，勿自行绑定
+
+      var en = wrap.querySelector('#wxst-cfg-enable');
+      en.checked = s.enabled !== false;
+      en.addEventListener('change', function () {
+        getSettings().enabled = en.checked;
+        saveSettings();
+        applyEnabled();
+        toast(en.checked ? '微信扩展已启用' : '微信扩展已停用', 'info');
+      });
+
+      var fab = wrap.querySelector('#wxst-cfg-fab');
+      fab.checked = s.showFab !== false;
+      fab.addEventListener('change', function () {
+        getSettings().showFab = fab.checked;
+        saveSettings();
+        var f = document.getElementById(LAUNCHER_ID);
+        if (fab.checked) { if (!f) buildLauncher(); }
+        else if (f) f.remove();
+        toast(fab.checked ? '已开启悬浮窗按钮' : '已关闭悬浮窗按钮（仍可从顶部「扩展」菜单打开微信）', 'info');
+      });
+
+      wrap.querySelector('#wxst-cfg-open').addEventListener('click', openApp);
+      wrap.querySelector('#wxst-cfg-settings').addEventListener('click', openSettings);
+      return true;
+    } catch (e) { log('注册扩展设置块失败:', e.message); return false; }
+  }
+
+  function openApp() {
+    try {
+      if (document.getElementById(OVERLAY_ID)) { closeApp(); return; }
+      var overlay = document.createElement('div');
+      overlay.id = OVERLAY_ID;
+      overlay.innerHTML =
+        '<div class="wxst-topbar">' +
+          '<span class="wxst-topbar-title">微信 · WeChat</span>' +
+          '<span class="wxst-topbar-right">' +
+            '<button class="wxst-topbar-btn" id="wxst-btn-settings" title="设置">⚙️</button>' +
+            '<button class="wxst-topbar-btn" id="wxst-btn-close" title="关闭">✕</button>' +
+          '</span>' +
+        '</div>' +
+        '<iframe class="wxst-frame" id="wxst-frame" src="' + APP_PATH + '?t=' + Date.now() + '"></iframe>';
+      document.body.appendChild(overlay);
+      document.getElementById('wxst-btn-close').addEventListener('click', closeApp);
+      document.getElementById('wxst-btn-settings').addEventListener('click', function () { openSettings(); });
+    } catch (e) { log('openApp 失败:', e && e.message); }
+  }
+
+  function closeApp() {
+    var o = document.getElementById(OVERLAY_ID);
+    if (o) o.remove();
+  }
+
+  /** 设置变更后刷新 app iframe（重新拉白名单/模型/生图配置） */
+  function reloadApp() {
+    var f = document.getElementById('wxst-frame');
+    if (f && f.contentWindow) { try { f.contentWindow.location.reload(); } catch (e) {} }
+  }
+
+  /* =============================== 设置面板 =============================== */
+
+  /** 同名角色展示名加后缀（与 listCharacters 一致） */
+  function displayNameOf(c) {
+    return c && c.displayName ? c.displayName : (c ? String(c.name || '') : '');
+  }
+
+  function escHtml(v) {
+    return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  /** 扩展层自定义确认弹窗（替代浏览器 confirm，注入酒馆页面） */
+  function wxstConfirm(msg, cb) {
+    var id = 'wxst-confirm-' + Date.now();
+    var wrap = document.createElement('div');
+    wrap.id = id;
+    wrap.style.cssText = 'position:fixed;inset:0;z-index:999999;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;';
+    wrap.innerHTML =
+      '<div style="width:300px;max-width:80vw;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.2)">' +
+        '<div style="padding:24px 18px;text-align:center;font-size:15px;color:#333;line-height:1.5">' + escHtml(msg) + '</div>' +
+        '<div style="display:flex;border-top:1px solid #e5e5e5">' +
+          '<button type="button" data-v="0" style="flex:1;padding:13px;border:none;background:#fff;font-size:15px;color:#666;cursor:pointer">取消</button>' +
+          '<button type="button" data-v="1" style="flex:1;padding:13px;border:none;border-left:1px solid #e5e5e5;background:#fff;font-size:15px;color:#07C160;font-weight:600;cursor:pointer">确定</button>' +
+        '</div>' +
+      '</div>';
+    function close() { if (wrap && wrap.parentNode) wrap.parentNode.removeChild(wrap); }
+    wrap.addEventListener('click', function (e) {
+      if (e.target === wrap) { close(); cb && cb(false); }
+    });
+    wrap.querySelector('[data-v="0"]').addEventListener('click', function () { close(); cb && cb(false); });
+    wrap.querySelector('[data-v="1"]').addEventListener('click', function () { close(); cb && cb(true); });
+    document.body.appendChild(wrap);
+  }
+
+  function openSettings() {
+    var old = document.getElementById(SETTINGS_ID);
+    if (old) { old.remove(); }
+    var s = getSettings();
+    var chars = null; try { chars = ctx().characters || []; } catch (e) {}
+    var curWhitelist = Array.isArray(s.whitelist) ? s.whitelist.map(String) : null;
+    var chat = s.chat || {};
+    var im = s.image || {};
+    var cfg = chatConfig();
+    var imCfg = imageConfig();
+
+    // 白名单行：value=key(avatar 文件名)，label=展示名（同名加后缀）
+    var nameCount = {};
+    (chars || []).forEach(function (c) { nameCount[c.name] = (nameCount[c.name] || 0) + 1; });
+    var seen = {};
+    var charRows = (chars || []).map(function (c) {
+      var key = String(c.avatar || c.name);
+      var label = c.name;
+      if (nameCount[c.name] > 1) {
+        seen[c.name] = (seen[c.name] || 0) + 1;
+        label = c.name + (seen[c.name] > 1 ? ' #' + seen[c.name] : '');
+      }
+      var checked = !curWhitelist || curWhitelist.indexOf(key) >= 0 || curWhitelist.indexOf(String(c.name)) >= 0;
+      return '<label class="wxst-row" title="' + escHtml(c.avatar || c.name) + '"><input type="checkbox" class="wxst-wl" value="' + escHtml(key) + '"' + (checked ? ' checked' : '') + '> <span>' + escHtml(label) + '</span></label>';
+    }).join('');
+
+    // 预设提示词行
+    var presets = Array.isArray(im.presets) ? im.presets : [];
+    function presetRow(p, i) {
+      p = p || {};
+      return '<div class="wxst-preset" data-i="' + i + '">' +
+        '<div class="wxst-preset-head"><input class="wxst-ps-name" placeholder="预设名（如：日漫风）" value="' + escHtml(p.name) + '">' +
+        '<button class="wxst-mini-btn wxst-ps-del" type="button">删除</button></div>' +
+        '<textarea class="wxst-ps-prompt" rows="2" placeholder="正面提示词（拼在 AI 提示词前面）">' + escHtml(p.prompt) + '</textarea>' +
+        '<input class="wxst-ps-neg" placeholder="该预设专属负面提示词（可留空，用全局负面）" value="' + escHtml(p.neg) + '">' +
+      '</div>';
+    }
+    var presetHtml = presets.map(function (p, i) { return presetRow(p, i); }).join('') +
+      '<div class="wxst-preset-empty" style="display:' + (presets.length ? 'none' : 'block') + ';color:#999;font-size:12px">暂无预设，点下方「＋ 添加预设」新增（如：赛璐璐风、厚涂风、写实风…）</div>';
+
+    var modal = document.createElement('div');
+    modal.id = SETTINGS_ID;
+    modal.innerHTML =
+      '<div class="wxst-settings-mask">' +
+        '<div class="wxst-settings-card">' +
+          '<div class="wxst-settings-head">微信 · 设置' +
+            '<span class="wxst-settings-close" id="wxst-set-close">✕</span>' +
+          '</div>' +
+          '<div class="wxst-settings-body">' +
+            '<div class="wxst-set-section"><div class="wxst-set-title">悬浮按钮</div>' +
+              '<label class="wxst-row"><input type="checkbox" id="wxst-showfab"' + (s.showFab !== false ? ' checked' : '') + '> 显示右下角悬浮按钮</label>' +
+            '</div>' +
+            '<div class="wxst-set-section"><div class="wxst-set-title">通讯录</div>' +
+              '<label>自动加入通讯录的 tag <input id="wxst-auto-wl-tag" value="' + escHtml(s.autoWhitelistTag || '') + '" placeholder="留空关闭。如填 wechat：打该 tag 的角色自动出现在通讯录"></label>' +
+              '<div class="wxst-set-tip">在酒馆「角色管理」给角色打上 tag 后，这里填同一个 tag，角色会自动加入通讯录（无需逐个点同意）；也可在「新朋友」里移除（会记住排除）。</div>' +
+            '</div>' +
+            '<div class="wxst-set-section"><div class="wxst-set-title">聊天</div>' +
+              '<label>全局聊天背景 <input id="wxst-chatbg" value="' + escHtml(s.chatBg || '') + '" placeholder="色值如 #E8E8E8 或图片 URL；每个角色也可在「角色详情 → 聊天背景」单独设置"></label>' +
+            '</div>' +
+            '<div class="wxst-set-section"><div class="wxst-set-title">朋友圈</div>' +
+              '<label class="wxst-row"><input type="checkbox" id="wxst-autopost"' + (s.autoPost ? ' checked' : '') + '> AI 自动发圈：生成草稿后直接发布（不勾选 = 生成后先预览再确认）</label>' +
+              '<label class="wxst-row"><input type="checkbox" id="wxst-autocomment"' + (s.autoComment ? ' checked' : '') + '> 发圈后 AI 自动让相关角色评论/点赞（不用自己逐条点）</label>' +
+              '<label>AI 评论角色数 <input id="wxst-autocomment-n" type="number" min="1" max="6" value="' + (s.autoCommentN || 2) + '"></label>' +
+            '</div>' +
+            '<details class="wxst-set-section wxst-collapse"' + ((chat.source || chat.model) ? ' open' : '') + '>' +
+              '<summary class="wxst-set-title">聊天模型（默认用酒馆当前配置）</summary>' +
+              '<label>来源 <input id="wxst-chat-source" value="' + escHtml(chat.source || '') + '" placeholder="留空用酒馆默认"></label>' +
+              '<label>API 地址 <input id="wxst-chat-url" value="' + escHtml(chat.custom_url || '') + '" placeholder="' + escHtml(cfg.custom_url) + '"></label>' +
+              '<label>模型 <input id="wxst-chat-model" value="' + escHtml(chat.model || '') + '" placeholder="' + escHtml(cfg.model) + '"></label>' +
+              '<label>温度 <input id="wxst-chat-temp" type="number" step="0.1" min="0" max="2" value="' + (chat.temperature != null ? chat.temperature : '') + '" placeholder="0.9"></label>' +
+              '<label>最大 Token <input id="wxst-chat-max" type="number" min="64" step="16" value="' + (chat.max_tokens || '') + '" placeholder="1024"></label>' +
+              '<div class="wxst-set-tip">这里全部留空 = 完全用你酒馆里配好的模型；改过这里才会覆盖酒馆设置。</div>' +
+            '</details>' +
+            '<div class="wxst-set-section"><div class="wxst-set-title">生图（NovelAI）' +
+              '<label class="wxst-row wxst-inline"><input type="checkbox" id="wxst-img-enabled"' + (getSettings().imageEnabled !== false ? ' checked' : '') + '> 启用生图（关闭后隐藏所有删除功能与配图入口）</label>' +
+            '</div>' +
+              '<div class="wxst-preset-pick">' +
+                '<label>用哪个预设 <select id="wxst-img-preset-sel"><option value="">默认</option></select></label>' +
+                '<button class="wxst-mini-btn wxst-import-zh" id="wxst-import-zh" type="button">↺ 一键导入智绘机预设与参数</button>' +
+              '</div>' +
+              '<div class="wxst-set-tip">导入后在上面下拉里选预设（如「漫画风」「咒回」）即可发朋友圈用。想微调再展开「自定义生图」。</div>' +
+              '<details class="wxst-set-adv"><summary class="wxst-set-title">自定义生图（进阶，平时不用动）</summary>' +
+                '<label>生图方式 <select id="wxst-img-mode">' +
+                  '<option value="proxy"' + (imCfg.mode === 'direct' ? '' : ' selected') + '>走酒馆代理（用酒馆/智绘机的 key）</option>' +
+                  '<option value="direct"' + (imCfg.mode === 'direct' ? ' selected' : '') + '>直连 NovelAI API（填下面自己的 key）</option>' +
+                '</select></label>' +
+                '<label>API 地址 <input id="wxst-img-url" value="' + escHtml(im.apiUrl || '') + '" placeholder="' + escHtml(imCfg.apiUrl) + '"></label>' +
+                '<label>API Key <input id="wxst-img-key" type="password" value="' + escHtml(im.apiKey || '') + '" placeholder="直连模式必填"></label>' +
+                '<label>基础正面提示词 <textarea id="wxst-img-base" rows="2" placeholder="例如：masterpiece, best quality">' + escHtml(im.basePrompt || '') + '</textarea></label>' +
+                '<label>模型 <input id="wxst-img-model" value="' + escHtml(im.model || '') + '" placeholder="' + escHtml(imCfg.model) + '"></label>' +
+                '<label>宽 <input id="wxst-img-w" type="number" value="' + (im.width || '') + '" placeholder="' + imCfg.width + '">　高 <input id="wxst-img-h" type="number" value="' + (im.height || '') + '" placeholder="' + imCfg.height + '"></label>' +
+                '<label>步数 <input id="wxst-img-steps" type="number" value="' + (im.steps || '') + '" placeholder="' + imCfg.steps + '">　采样器 <input id="wxst-img-sampler" value="' + escHtml(im.sampler || '') + '" placeholder="' + escHtml(imCfg.sampler) + '"></label>' +
+                '<label>调度器 <input id="wxst-img-scheduler" value="' + escHtml(im.scheduler || '') + '" placeholder="' + escHtml(imCfg.scheduler) + '"></label>' +
+                '<label>负面提示词 <textarea id="wxst-img-neg" rows="2" placeholder="' + escHtml(imCfg.negative_prompt) + '">' + escHtml(im.negative_prompt || '') + '</textarea></label>' +
+                '<label>质量标签 AQT（自动加在提示词末尾） <input id="wxst-img-aqt" value="' + escHtml(im.aqt || imCfg.aqt || '') + '"></label>' +
+                '<label class="wxst-row"><input type="checkbox" id="wxst-img-sm"' + (im.sm != null ? (im.sm ? ' checked' : '') : (imCfg.sm ? ' checked' : '')) + '> sm</label>' +
+                '<label class="wxst-row"><input type="checkbox" id="wxst-img-smdy"' + (im.sm_dyn != null ? (im.sm_dyn ? ' checked' : '') : (imCfg.sm_dyn ? ' checked' : '')) + '> sm_dyn</label>' +
+                '<div class="wxst-set-subtitle">预设列表（发朋友圈可选）</div>' +
+                '<div class="wxst-preset-list" id="wxst-img-presets">' + presetHtml + '</div>' +
+                '<button class="wxst-mini-btn" id="wxst-ps-add" type="button">＋ 添加预设</button>' +
+              '</details>' +
+            '</div>' +
+            '<div class="wxst-set-tip">通讯录白名单已挪到微信 App 里管理：通讯录页右上角「＋」→ 新朋友，点「同意」加入即可。</div>' +
+          '</div>' +
+          '<div class="wxst-settings-foot">' +
+            '<button class="wxst-btn" id="wxst-set-reset">重置默认</button>' +
+            '<button class="wxst-btn wxst-btn-primary" id="wxst-set-save">保存</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(modal);
+
+    // 预设下拉：填充并选中默认预设
+    function fillPresetSel(selectDefault) {
+      var sel = document.getElementById('wxst-img-preset-sel');
+      if (!sel) return;
+      sel.innerHTML = '<option value="">默认</option>';
+      (imageConfig().presets).forEach(function (p) {
+        var o = document.createElement('option');
+        o.value = p.name; o.textContent = p.name;
+        sel.appendChild(o);
+      });
+      var def = selectDefault || getSettings().image && getSettings().image.defaultPreset || imageConfig().defaultPreset;
+      if (def && sel.querySelector('option[value="' + def.replace(/"/g, '\\"') + '"]')) sel.value = def;
+    }
+    fillPresetSel();
+
+    document.getElementById('wxst-set-close').addEventListener('click', function () { modal.remove(); });
+    modal.addEventListener('click', function (e) { if (e.target.classList && e.target.classList.contains('wxst-settings-mask')) modal.remove(); });
+
+    // 预设增删
+    function reindexPresets() {
+      document.querySelectorAll('#wxst-img-presets .wxst-preset').forEach(function (el, i) { el.dataset.i = i; });
+      var empty = document.querySelector('#wxst-img-presets .wxst-preset-empty');
+      var has = document.querySelectorAll('#wxst-img-presets .wxst-preset').length > 0;
+      if (empty) empty.style.display = has ? 'none' : 'block';
+    }
+    document.getElementById('wxst-ps-add').addEventListener('click', function () {
+      var listEl = document.getElementById('wxst-img-presets');
+      var div = document.createElement('div');
+      div.className = 'wxst-preset';
+      div.innerHTML = '<div class="wxst-preset-head"><input class="wxst-ps-name" placeholder="预设名（如：日漫风）">' +
+        '<button class="wxst-mini-btn wxst-ps-del" type="button">删除</button></div>' +
+        '<textarea class="wxst-ps-prompt" rows="2" placeholder="正面提示词（拼在 AI 提示词前面）"></textarea>' +
+        '<input class="wxst-ps-neg" placeholder="该预设专属负面提示词（可留空）">';
+      listEl.insertBefore(div, listEl.querySelector('.wxst-preset-empty'));
+      reindexPresets();
+    });
+    // 从智绘机一键导入：导入后刷新预设下拉并选中当前预设
+    document.getElementById('wxst-import-zh').addEventListener('click', function () {
+      try {
+        var r = importFromChatu8();
+        fillPresetSel(r.defaultPreset);
+        toast('已导入 ' + (r.presets || []).length + ' 个预设（默认「' + (r.defaultPreset || '无') + '」）' + (r.hasKey ? '，含 API Key' : '') + '，请点保存', 'info');
+      } catch (e) {
+        toast('导入失败：' + e.message, 'error');
+      }
+    });
+    modal.addEventListener('click', function (e) {
+      if (e.target.classList && e.target.classList.contains('wxst-ps-del')) {
+        var row = e.target.closest('.wxst-preset');
+        if (row) row.remove();
+        reindexPresets();
+      }
+    });
+
+    document.getElementById('wxst-set-reset').addEventListener('click', function () {
+      wxstConfirm('确定重置全部设置？', function (ok) {
+        if (!ok) return;
+        try { delete ctx().extensionSettings[EXT_KEY]; } catch (e) {}
+        saveSettings();
+        modal.remove();
+        reloadApp();
+        toast('已重置，请重新打开设置', 'success');
+      });
+    });
+
+    document.getElementById('wxst-set-save').addEventListener('click', function () {
+      // 收集预设
+      var presetsOut = [];
+      document.querySelectorAll('#wxst-img-presets .wxst-preset').forEach(function (el) {
+        var name = (el.querySelector('.wxst-ps-name').value || '').trim();
+        var prompt = (el.querySelector('.wxst-ps-prompt').value || '').trim();
+        var neg = (el.querySelector('.wxst-ps-neg').value || '').trim();
+        if (name) presetsOut.push({ name: name, prompt: prompt, neg: neg || undefined });
+      });
+      s.showFab = document.getElementById('wxst-showfab').checked;
+      s.imageEnabled = document.getElementById('wxst-img-enabled').checked;
+      s.chat = {
+        source: document.getElementById('wxst-chat-source').value.trim() || undefined,
+        custom_url: document.getElementById('wxst-chat-url').value.trim() || undefined,
+        model: document.getElementById('wxst-chat-model').value.trim() || undefined,
+        temperature: document.getElementById('wxst-chat-temp').value === '' ? undefined : Number(document.getElementById('wxst-chat-temp').value),
+        max_tokens: document.getElementById('wxst-chat-max').value === '' ? undefined : Number(document.getElementById('wxst-chat-max').value),
+      };
+      s.image = {
+        defaultPreset: document.getElementById('wxst-img-preset-sel').value || undefined,
+        mode: document.getElementById('wxst-img-mode').value,
+        apiUrl: document.getElementById('wxst-img-url').value.trim() || undefined,
+        apiKey: document.getElementById('wxst-img-key').value.trim() || undefined,
+        basePrompt: document.getElementById('wxst-img-base').value.trim() || undefined,
+        presets: presetsOut.length ? presetsOut : undefined,
+        model: document.getElementById('wxst-img-model').value.trim() || undefined,
+        width: document.getElementById('wxst-img-w').value === '' ? undefined : Number(document.getElementById('wxst-img-w').value),
+        height: document.getElementById('wxst-img-h').value === '' ? undefined : Number(document.getElementById('wxst-img-h').value),
+        steps: document.getElementById('wxst-img-steps').value === '' ? undefined : Number(document.getElementById('wxst-img-steps').value),
+        sampler: document.getElementById('wxst-img-sampler').value.trim() || undefined,
+        scheduler: document.getElementById('wxst-img-scheduler').value.trim() || undefined,
+        negative_prompt: document.getElementById('wxst-img-neg').value.trim() || undefined,
+        aqt: document.getElementById('wxst-img-aqt').value.trim() || undefined,
+        sm: document.getElementById('wxst-img-sm').checked,
+        sm_dyn: document.getElementById('wxst-img-smdy').checked,
+      };
+      s.autoPost = document.getElementById('wxst-autopost').checked;
+      s.autoComment = document.getElementById('wxst-autocomment').checked;
+      s.autoCommentN = Math.min(6, Math.max(1, Number(document.getElementById('wxst-autocomment-n').value) || 2));
+      var tagEl = document.getElementById('wxst-auto-wl-tag');
+      if (tagEl) s.autoWhitelistTag = String(tagEl.value || '').trim();
+      var bgEl = document.getElementById('wxst-chatbg');
+      if (bgEl) s.chatBg = String(bgEl.value || '').trim();
+      // 清理空对象
+      Object.keys(s.chat).forEach(function (k) { if (s.chat[k] === undefined) delete s.chat[k]; });
+      Object.keys(s.image).forEach(function (k) { if (s.image[k] === undefined) delete s.image[k]; });
+      if (!Object.keys(s.chat).length) delete s.chat;
+      if (!Object.keys(s.image).length) delete s.image;
+      saveSettings();
+      charCache = null; // 白名单变了，刷新角色缓存
+      modal.remove();
+      reloadApp();
+      // 按 showFab 显示/隐藏悬浮按钮
+      var fab = document.getElementById(LAUNCHER_ID);
+      if (s.showFab === false) { if (fab) fab.remove(); }
+      else { buildLauncher(); }
+      toast('设置已保存', 'success');
+    });
+  }
+
+  /* =============================== 桥接 API（供 iframe 内的前端调用） =============================== */
+
+  window.WXBRIDGE = {
+    getConfig: getConfig,
+    getSettings: function () { return getSettings(); },
+    saveAppSettings: function (patch) { Object.assign(getSettings(), patch || {}); saveSettings(); return true; },
+    listCharacters: listCharacters,
+    isAllowed: isAllowed,
+    whitelistOf: whitelistOf,
+    getChat: getChat,
+    saveChat: saveChat,
+    deleteChat: deleteChat,
+    genChat: genChat,
+    genImage: genImage,
+    debugPrompt: function (prompt, preset) {
+      try { return JSON.stringify({ pos: composePrompt(prompt || '', preset || ''), neg: imageConfig().negative_prompt || '', presetName: preset || '', defaultPreset: imageConfig().defaultPreset || '', presets: imageConfig().presets.map(function (p) { return p.name; }) }); }
+      catch (e) { return 'ERR ' + (e.message || e); }
+    },
+    getMoments: function () {
+      return getMomentsChat().then(function (r) { return { group: { id: r.group.id, name: r.group.name }, posts: parseMoments(r.chat) }; });
+    },
+    publishMoment: publishMoment,
+    addComment: addComment,
+    deleteMoment: deleteMoment,
+    deleteComment: deleteComment,
+    aiComment: aiComment,
+    genAutoMoment: genAutoMoment,
+    listPersonas: listPersonas,
+    listWorldInfos: listWorldInfos,
+    getWorldInfoText: getWorldInfoText,
+    getWorldInfoEntries: getWorldInfoEntries,
+    importFromChatu8: importFromChatu8,
+    openSettings: openSettings,
+    closeApp: closeApp,
+    log: log,
+  };
+
+  /* =============================== 启动 =============================== */
+
+  function init() {
+    applyEnabled();
+    ensureSettingsPanel();
+    // ST 扩展菜单/设置容器是异步构建的，稍后重试几次确保入口挂上
+    setTimeout(function () { buildMenuEntry(); ensureSettingsPanel(); }, 1500);
+    setTimeout(function () { buildMenuEntry(); ensureSettingsPanel(); }, 4000);
+    log('扩展已加载 · 点悬浮 💬 打开微信');
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
