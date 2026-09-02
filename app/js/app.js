@@ -143,6 +143,8 @@ const App = (() => {
     // 预加载数据：先配置（含白名单）再角色，避免并行时白名单未就绪
     try {
       await loadConfig();
+      // 会话映射多端同步：拉取酒馆设置里的权威副本覆盖本地缓存
+      await Store.syncFromServer();
       // 公众号 tab 开关（设置里可关闭）
       const artTab = document.getElementById('tab-articles');
       if (artTab) artTab.style.display = (state.config && state.config.enableArticle !== false) ? '' : 'none';
