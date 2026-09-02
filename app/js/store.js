@@ -10,7 +10,7 @@ const Store = (() => {
     try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch { return {}; }
   }
   function save(map) {
-    localStorage.setItem(KEY, JSON.stringify(map));
+    try { localStorage.setItem(KEY, JSON.stringify(map)); } catch (e) { /* 隐私模式/禁用存储：忽略 */ }
   }
 
   /** 会话归档键：优先角色唯一标识 key（avatar_file），兼容旧版本按 name 存储的数据 */
@@ -74,10 +74,10 @@ const Store = (() => {
     try { return JSON.parse(localStorage.getItem(CUR)) || null; } catch { return null; }
   }
   function setCurrent(ctx) {
-    localStorage.setItem(CUR, JSON.stringify(ctx));
+    try { localStorage.setItem(CUR, JSON.stringify(ctx)); } catch (e) { /* 忽略 */ }
   }
   function clearCurrent() {
-    localStorage.removeItem(CUR);
+    try { localStorage.removeItem(CUR); } catch (e) { /* 忽略 */ }
   }
 
   /** 生成酒馆风格的会话文件名 */

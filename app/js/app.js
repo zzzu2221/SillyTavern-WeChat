@@ -1,4 +1,18 @@
 /* ============ 应用主控：路由 / Tab / 全局状态 ============ */
+/* 全局错误捕获：移动端排查用（任何 JS 异常都弹出来，避免白屏后无从下手） */
+(function () {
+  function toastMsg(m) {
+    try { if (window.UI && UI.toast) UI.toast(m); else console.error('[WXST]', m); } catch (e) {}
+  }
+  window.addEventListener('error', function (e) {
+    toastMsg('页面错误: ' + (e.message || 'unknown'));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e && e.reason;
+    toastMsg('异步错误: ' + ((r && (r.message || r)) || 'unknown'));
+  });
+})();
+
 const App = (() => {
   // 全局缓存
   const state = {

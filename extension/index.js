@@ -917,20 +917,21 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     btn.style.bottom = 'auto';
   }
 
-  /** 悬浮按钮：长按/拖拽移动，短按打开 */
-  function enableFabDrag(btn) {
-    var drag = { active: false, moved: false, sx: 0, sy: 0, ox: 0, oy: 0 };
+  /** 悬浮按钮：长按/拖拽移动，短按打开（不依赖 click，兼容移动端 touch/pointer 丢失 click 的情况） */
+  function enableFabDrag(btn, onTap) {
+    var drag = { active: false, moved: false, sx: 0, sy: 0, ox: 0, oy: 0, thresh: 8 };
     function down(e) {
       drag.active = true; drag.moved = false;
       drag.sx = e.clientX; drag.sy = e.clientY;
       var r = btn.getBoundingClientRect();
       drag.ox = r.left; drag.oy = r.top;
-      if (btn.setPointerCapture) { try { btn.setPointerCapture(e.pointerId); } catch (err) {} }
+      // 触摸设备点击时手指会抖动，用更大的阈值避免误判为拖动；鼠标保持灵敏
+      drag.thresh = (e.pointerType === 'touch') ? 14 : 6;
     }
     function move(e) {
       if (!drag.active) return;
       var dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
-      if (!drag.moved && (Math.abs(dx) + Math.abs(dy)) > 6) drag.moved = true;
+      if (!drag.moved && (Math.abs(dx) + Math.abs(dy)) > drag.thresh) drag.moved = true;
       if (!drag.moved) return;
       if (e.preventDefault) e.preventDefault();
       var x = Math.max(4, Math.min(window.innerWidth - btn.offsetWidth - 4, drag.ox + dx));
@@ -940,7 +941,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       btn.style.right = 'auto';
       btn.style.bottom = 'auto';
     }
-    function end() {
+    function up() {
       if (!drag.active) return;
       drag.active = false;
       if (drag.moved) {
@@ -948,15 +949,18 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
         var r = btn.getBoundingClientRect();
         s.fabPos = { x: Math.round(r.left), y: Math.round(r.top) };
         saveSettings();
+      } else if (onTap) {
+        onTap(); // 短按（未拖动）：打开微信。不依赖 click，移动端稳定
       }
     }
     btn.addEventListener('pointerdown', down);
-    btn.addEventListener('pointermove', move);
-    btn.addEventListener('pointerup', end);
-    btn.addEventListener('pointercancel', end);
-    // 拖动后抑制 click 打开
+    // move/up 挂 window：手指/鼠标移出按钮也能继续拖动并正常结束
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    // 短按已由 up 触发 onTap；这里吞掉 click，避免桌面端/移动端重复打开
     btn.addEventListener('click', function (e) {
-      if (drag.moved) { e.preventDefault(); e.stopPropagation(); }
+      e.preventDefault(); e.stopPropagation();
     });
   }
 
@@ -967,10 +971,9 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     btn.id = LAUNCHER_ID;
     btn.title = '打开微信';
     btn.innerHTML = '<span class="wxst-fab-icon">💬</span>';
-    btn.addEventListener('click', function () { openApp(); });
     document.body.appendChild(btn);
     applyFabPos(btn);
-    enableFabDrag(btn);
+    enableFabDrag(btn, openApp); // 短按打开（pointerup 触发，兼容移动端）
   }
 
   /** 在酒馆顶部「扩展」菜单加一个微信入口（即使悬浮按钮关闭也能打开） */
@@ -1066,26 +1069,54 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
   function openApp() {
     try {
       if (document.getElementById(OVERLAY_ID)) { closeApp(); return; }
+      // 全部内联样式 + vw/vh 单位：手机上酒馆页面存在带 transform 的祖先容器，
+      // 会让 position:fixed 的百分比尺寸（width/height:100%）错乱成 0；vw/vh 始终相对视口，不受影响
       var overlay = document.createElement('div');
       overlay.id = OVERLAY_ID;
-      overlay.innerHTML =
-        '<div class="wxst-topbar">' +
-          '<span class="wxst-topbar-title">微信 · WeChat</span>' +
-          '<span class="wxst-topbar-right">' +
-            '<button class="wxst-topbar-btn" id="wxst-btn-settings" title="设置">⚙️</button>' +
-            '<button class="wxst-topbar-btn" id="wxst-btn-close" title="关闭">✕</button>' +
-          '</span>' +
-        '</div>' +
-        '<iframe class="wxst-frame" id="wxst-frame" src="' + APP_PATH + '?t=' + Date.now() + '"></iframe>';
-      document.body.appendChild(overlay);
+      overlay.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;height:100dvh;z-index:9999999;background:#ededed;display:flex;flex-direction:column;overflow:hidden;margin:0;padding:0;';
+      var topbar = document.createElement('div');
+      topbar.style.cssText = 'height:44px;flex:0 0 44px;width:100%;background:#ededed;display:flex;align-items:center;justify-content:space-between;padding:0 12px;box-sizing:border-box;border-bottom:0.5px solid rgba(0,0,0,.08);';
+      topbar.innerHTML =
+        '<span style="font-size:16px;font-weight:600;color:#111">微信 · WeChat</span>' +
+        '<span style="display:flex;gap:6px">' +
+          '<button id="wxst-btn-settings" type="button" style="background:#fff;border:1px solid #d9d9d9;border-radius:8px;font-size:14px;width:34px;height:30px;cursor:pointer;color:#333">⚙️</button>' +
+          '<button id="wxst-btn-close" type="button" style="background:#fff;border:1px solid #d9d9d9;border-radius:8px;font-size:14px;width:34px;height:30px;cursor:pointer;color:#333">✕</button>' +
+        '</span>';
+      var iframe = document.createElement('iframe');
+      iframe.id = 'wxst-frame';
+      iframe.style.cssText = 'flex:1 1 auto;width:100%;height:calc(100vh - 44px);height:calc(100dvh - 44px);min-height:0;border:none;display:block;background:#fff;';
+      iframe.src = APP_PATH + '?t=' + Date.now();
+      overlay.appendChild(topbar);
+      overlay.appendChild(iframe);
+      // 挂到 html 元素而非 body：手机上 body 若带 transform/样式可能干扰 fixed 定位
+      document.documentElement.appendChild(overlay);
       document.getElementById('wxst-btn-close').addEventListener('click', closeApp);
       document.getElementById('wxst-btn-settings').addEventListener('click', function () { openSettings(); });
-    } catch (e) { log('openApp 失败:', e && e.message); }
+      // overlay 已成功挂载后再隐藏悬浮标，避免打开失败导致悬浮键消失
+      var fab = document.getElementById(LAUNCHER_ID);
+      if (fab) fab.style.display = 'none';
+      iframe.addEventListener('load', function () {
+        try {
+          var d = iframe.contentDocument;
+          if (d && !d.getElementById('app')) {
+            log('微信 iframe 已加载但未找到 #app（app 页面可能报错白屏）');
+          }
+        } catch (e) {}
+      });
+      iframe.addEventListener('error', function () {
+        try { toast('微信页面加载失败，请确认手机能访问酒馆'); } catch (e) {}
+      });
+    } catch (e) {
+      log('openApp 失败:', e && e.message);
+      try { toast('微信打开失败：' + (e && e.message)); } catch (e2) {}
+    }
   }
 
   function closeApp() {
     var o = document.getElementById(OVERLAY_ID);
     if (o) o.remove();
+    var fab = document.getElementById(LAUNCHER_ID);
+    if (fab) fab.style.display = ''; // 关闭后恢复悬浮标
   }
 
   /** 设置变更后刷新 app iframe（重新拉白名单/模型/生图配置） */
