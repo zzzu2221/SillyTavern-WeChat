@@ -1269,7 +1269,16 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
           '</div>' +
         '</div>' +
       '</div>';
-    document.body.appendChild(modal);
+    // 挂载到 documentElement（与微信 overlay 同级）：手机上 body 带 transform 会形成独立层叠上下文，
+    // 若挂 body 则设置面板永远被 overlay 盖住（“夹在中间”）。挂 documentElement 才能用 z-index 公平竞争。
+    (document.documentElement || document.body).appendChild(modal);
+    // 内联强制全屏遮罩+居中：绕开移动端 CSS 缓存/transform 干扰（与 overlay 同机制）
+    try {
+      var maskEl = modal.querySelector('.wxst-settings-mask');
+      if (maskEl) maskEl.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;height:100dvh;z-index:99999999;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;margin:0;padding:0;';
+      var cardEl = modal.querySelector('.wxst-settings-card');
+      if (cardEl) cardEl.style.cssText = 'width:min(560px,92vw);max-height:86vh;max-height:86dvh;background:#fff;border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.25);';
+    } catch (e3) { log('设置面板内联样式失败:', e3 && e3.message); }
 
     // 预设下拉：填充并选中默认预设
     function fillPresetSel(selectDefault) {
