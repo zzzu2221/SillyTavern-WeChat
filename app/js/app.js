@@ -83,6 +83,9 @@ const App = (() => {
       // 每次进入朋友圈都拉取最新数据（避免发布/评论后不刷新）
       Moments.load().then(() => Moments.render()).catch(e => UI.toast('朋友圈加载失败：' + e.message));
     }
+    else if (tab === 'articles') {
+      Articles.load().then(() => Articles.render()).catch(e => UI.toast('公众号加载失败：' + e.message));
+    }
     else if (tab === 'me') renderMe();
   }
 
@@ -134,11 +137,15 @@ const App = (() => {
     Chat.init();
     Detail.init();
     Moments.init();
+    Articles.init();
     Friends.init();
     Me.init();
     // 预加载数据：先配置（含白名单）再角色，避免并行时白名单未就绪
     try {
       await loadConfig();
+      // 公众号 tab 开关（设置里可关闭）
+      const artTab = document.getElementById('tab-articles');
+      if (artTab) artTab.style.display = (state.config && state.config.enableArticle !== false) ? '' : 'none';
       await refreshCharacters();
     } catch (e) {
       UI.toast('连接后端失败：' + e.message);

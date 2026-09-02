@@ -31,6 +31,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     } catch (e) { return '/scripts/extensions/third-party/SillyTavern-WeChat/app/index.html'; }
   })();
   var MOMENTS_GROUP_NAME = '朋友圈';
+  var ARTICLES_GROUP_NAME = '公众号';
   var OVERLAY_ID = 'wxst-overlay';
   var LAUNCHER_ID = 'wxst-launcher';
   var SETTINGS_ID = 'wxst-settings';
@@ -721,10 +722,11 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       args.relation ? '你与这位好友的关系：' + args.relation + '（评论语气和称呼都要贴合这层关系，例如按关系用“老师/同期/恋人/同事”等合适的称呼，不要用错）' : '',
       '好友朋友圈内容：' + (args.momentText || '(无正文)'),
       '发布这条朋友圈的是「' + (args.posterName || '你的好友') + '」。',
-      '评论中称呼对方，必须符合「' + displayName + '」与「' + (args.posterName || '对方') + '」在原作/人设中的关系：如果是同期、同窗、同级或平辈，就直接叫名字或昵称（例如同期同学之间直接叫“杰”而不是“老师”），绝不要用“老师”“先生”“前辈”“大人”等职务或敬称，除非你们的关系设定里明确是师生/前后辈。',
+      '评论中称呼对方用词必须符合「' + displayName + '」与「' + (args.posterName || '对方') + '」在原作/人设中的关系：如果是同期、同窗、同级或平辈，就直接叫名字或昵称（例如同期同学之间直接叫“杰”而不是“老师”），绝不要用“老师”“先生”“前辈”“大人”等职务或敬称，除非你们的关系设定里明确是师生/前后辈。',
+      '但不要每条评论都机械地以对方名字或称呼开头：真实朋友圈评论大多数是直接开口说话（例如“明天我陪你去，但别点太甜的”“你请客？上次欠我的饮料钱还没还”），只有需要点名调侃、质问、强调或显得亲昵时才带上称呼（例如“悟，你欠我的报告呢”“杰，这次又是你请客？”）。评论要自然、口语化、风格多样，不要千篇一律都喊名字开头。',
       '务必围绕上面这条朋友圈内容本身来评论（内容相关、真实合理），不要跑题，不要编造朋友圈里没有发生的事，不要张冠李戴、不要喊错名字。',
       '严禁出现与评论内容无关的功能性或系统用语（如“撤回”“删除”“警告”“提示”“系统”等），评论必须是纯粹自然的朋友圈互动对话，像一个真人在刷朋友圈时随口说的话。',
-      '请以「' + displayName + '」的口吻写一条简短的中文评论（30字以内），口语化、符合人设，不要使用任何标记符号，不要加引号，只输出评论内容本身。',
+      '请以「' + displayName + '」的口吻写一条简短的中文评论（30字以内），口语化、符合人设，直接开口说话，不要机械地在开头加对方名字/称呼，不要使用任何标记符号，不要加引号，只输出评论内容本身。',
     ].filter(Boolean).join('\n');
     var reply = await genChat([
       { role: 'system', content: '你是朋友圈评论助手。' },
@@ -768,6 +770,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       '配图英文生图提示词必须严格遵守以下格式规则：',
       IMG_PROMPT_RULES,
       imgTagLine,
+      '朋友圈正文必须是发朋友圈时说出口/写下的字，绝对禁止任何括号动作、表情、神态、心理描写或旁白（例如不要写“（眨眼）”“（捂嘴笑）”“（看着手机）”“（递过）”，也不要写“（白井老师快看我真诚的大眼睛）”这类），不要用任何括号、星号、下划线等标记符号，纯文字、口语化、像一个真人在发朋友圈。',
       '只输出 JSON：{"text":"中文朋友圈正文","imgPrompt":"english image prompt"}',
     ].filter(Boolean).join('\n');
     var reply = await genChat([
@@ -784,6 +787,151 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       obj = { text: tm ? tm[1] : content.slice(0, 60), imgPrompt: im ? im[1] : '' };
     }
     return { text: String(obj.text || '').trim(), imgPrompt: String(obj.imgPrompt || '').trim() };
+  }
+
+  /* ---------------- 公众号（酒馆群组存储，AI 按世界观写文） ---------------- */
+  async function ensureArticlesGroup() {
+    var s = getSettings();
+    if (s.articlesGroupId) {
+      try {
+        var groups0 = await st('POST', '/api/groups/all', {});
+        var g0 = (groups0 || []).find(function (g) { return String(g.id) === String(s.articlesGroupId); });
+        if (g0) return g0;
+      } catch (e) {}
+    }
+    var groups = await st('POST', '/api/groups/all', {});
+    var byName = (groups || []).find(function (g) { return g.name === ARTICLES_GROUP_NAME; });
+    if (byName) { s.articlesGroupId = String(byName.id); saveSettings(); return byName; }
+    var chars = await listCharacters();
+    var members = [];
+    var allChars = null; try { allChars = ctx().characters || []; } catch (e) {}
+    for (var i = 0; i < (allChars || []).length; i++) {
+      var a = allChars[i] && allChars[i].avatar;
+      if (a && a !== 'none') members.push(a);
+    }
+    if (!members.length) members = ['none'];
+    var created = await st('POST', '/api/groups/create', {
+      name: ARTICLES_GROUP_NAME,
+      members: members,
+      allow_self_responses: false,
+      activation_strategy: 0,
+      generation_mode: 0,
+      disabled_members: [],
+      fav: false,
+      chat_id: String(Date.now()),
+      chats: [],
+    });
+    s.articlesGroupId = String(created.id);
+    saveSettings();
+    return created;
+  }
+  async function getArticlesChat() {
+    var g = await ensureArticlesGroup();
+    var chat = await st('POST', '/api/chats/group/get', { id: g.id });
+    return { group: g, chat: Array.isArray(chat) ? chat : [] };
+  }
+  async function saveArticlesChat(g, chat) {
+    return st('POST', '/api/chats/group/save', { id: g.id, chat: chat, force: true });
+  }
+  function parseArticleTag(mes) {
+    var fields = {};
+    var body = String(mes).replace(/^【公众号文章】/, '').trim();
+    var segs = body.split(';');
+    for (var i = 0; i < segs.length; i++) {
+      var seg = segs[i];
+      var idx = seg.indexOf('=');
+      if (idx > 0) {
+        var k = seg.slice(0, idx).trim();
+        var v = seg.slice(idx + 1).trim();
+        if (k && !(k in fields)) fields[k] = v;
+      }
+    }
+    return fields;
+  }
+  async function getArticles() {
+    var r = await getArticlesChat();
+    var articles = (r.chat || []).map(function (m) {
+      var mes = (m.mes || '').trim();
+      if (mes.indexOf('【公众号文章】') !== 0) return null;
+      var f = parseArticleTag(mes);
+      return {
+        id: f.id || ('a' + Date.now()),
+        character: f['角色'] || m.name || '未知',
+        author: f['公众号'] || '',
+        key: f.key || '',
+        time: f['时间'] || m.send_date || '',
+        title: f['标题'] || '(无标题)',
+        body: f['正文'] || '',
+      };
+    }).filter(Boolean).sort(function (a, b) { return new Date(b.time || 0) - new Date(a.time || 0); });
+    return { articles: articles };
+  }
+  async function publishArticle(args) {
+    args = args || {};
+    if (!args.title || !args.body) throw new Error('标题与正文不能为空');
+    var author = String(args.author || '').trim() || '未知公众号';
+    var g = await ensureArticlesGroup();
+    var id = 'a' + Date.now() + Math.random().toString(16).slice(2, 8);
+    var mes = '【公众号文章】id=' + id + ';角色=公众号;key=;时间=' + nowIso() + ';公众号=' + author + ';标题=' + args.title + ';正文=' + args.body;
+    var mesObj = { name: author, is_user: true, is_system: false, send_date: nowIso(), mes: mes, extra: { id: id, api: 'articles', model: 'wechat-st' } };
+    var chat = (await getArticlesChat()).chat;
+    chat.push(mesObj);
+    await saveArticlesChat(g, chat);
+    return { id: id };
+  }
+  async function deleteArticle(articleId) {
+    if (!articleId) throw new Error('缺少文章 id');
+    var g = await ensureArticlesGroup();
+    var r = await getArticlesChat();
+    var kept = r.chat.filter(function (m) {
+      var mes = String(m.mes || '').trim();
+      if (mes.indexOf('【公众号文章】') !== 0) return true;
+      var f = parseArticleTag(mes);
+      return f.id !== articleId;
+    });
+    if (kept.length === r.chat.length) throw new Error('未找到该文章');
+    await saveArticlesChat(g, kept);
+    return { ok: true };
+  }
+  /** AI 生成公众号文章：营销号/技术号/探店号小编口吻，发布人由 AI 拟；不硬扯角色 */
+  async function genArticle(args) {
+    args = args || {};
+    // 世界观素材：玩家账号的世界书/人设（提供新宿、涩谷、五条家等地名与背景知识）
+    var meWorld = '';
+    try { meWorld = args.meDesc || ''; } catch (e) {}
+    var prompt = [
+      '你是一个微信公众平台的内容小编，负责运营一个公众号（营销号/技术号/探店号风格），现在要写一篇推文。你只是公众号小编，不是任何角色本人，内容面向大众读者。',
+      '素材：',
+      args.hint ? '- 本期主题（用户给的）：' + args.hint : '',
+      meWorld ? '- 世界观背景（用于了解世界的地名/组织/热门话题，不要照抄）：' + String(meWorld).slice(0, 1000) : '',
+      '写作要求：',
+      '1) 主题如果是探店、攻略、生活方式、美食、旅游、科技、日常技巧这类：就写成正经的探店/攻略/资讯内容，聚焦地点、店铺、体验、口味、价格、实用信息等，内容要有干货。绝对不要把内容硬往某个角色身上扯；除非该主题本身就是世界观里的热点新闻。',
+      '2) 主题如果是世界观相关的热点新闻（例如"五条家新任最强家主"这种）：以小编报道的视角写，可用旁观者口吻提及相关角色/事件，但绝不站在任何角色第一人称口吻，不代入角色情绪。',
+      '3) 标题要吸引眼球（如《震惊！…》《…深度解析》《…不为人知的秘密》《…探店指南》《…避雷》等），正文 200~400 字左右，自然分段。',
+      '4) 绝对不要用任何 Markdown 标记（如 #、*、-），不要写括号动作/表情/心理描写，纯文字内容。',
+      '5) 拟一个贴合题材/世界观的公众号名称（如「东京甜品生存指南」「新宿探店手册」「高专百晓生」，不要用角色名当公众号名）。',
+      '6) 视角分层（非常重要）：这个世界存在「普通公众」和「知晓内情者」两类人。普通公众完全不知道咒术师、咒力、术式、诅咒、咒灵等超自然存在的存在。默认按普通公众视角写作：探店、攻略、生活、美食、旅游类内容，绝对不透露任何超自然设定——不要出现"咒力""术式""咒术师""无咒力""诅咒"等词，最多用"这家店据说有点玄乎"这类都市传说式的调侃。只有当主题本身明确是咒术师/高专/诅咒等内行话题（例如"五条家新任最强家主"）时，才以知情的小编报道视角写作，且仍用旁观者口吻、不代入任何角色。',
+      '只输出 JSON：{"author":"公众号名称","title":"标题（10~20字，吸引人）","body":"正文（纯文字，自然分段）"}',
+    ].filter(Boolean).join('\n');
+    var reply = await genChat([
+      { role: 'system', content: '你是公众号文章写作助手，只输出合法 JSON。' },
+      { role: 'user', content: prompt },
+    ], { temperature: 0.9, max_tokens: 1500 });
+    var content = String(reply.content || '').trim();
+    var jsonText = content.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    var obj = null;
+    try { obj = JSON.parse(jsonText); } catch (e) {}
+    if (!obj || !obj.body) {
+      var tm = content.match(/["']?title["']?\s*[:：]\s*["']([^"']+)["']/);
+      var bm = content.match(/["']?body["']?\s*[:：]\s*["']([^"']+)["']/);
+      var am = content.match(/["']?author["']?\s*[:：]\s*["']([^"']+)["']/);
+      obj = { author: am ? am[1] : '', title: tm ? tm[1] : '深度好文', body: bm ? bm[1] : content.slice(0, 200) };
+    }
+    return {
+      author: String(obj.author || '').trim(),
+      title: String(obj.title || '').trim(),
+      body: String(obj.body || '').trim(),
+    };
   }
 
   /* ---- 酒馆用户设定（User Persona）与世界书 ---- */
@@ -886,7 +1034,9 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       whitelistExcluded: Array.isArray(getSettings().whitelistExcluded) ? getSettings().whitelistExcluded.map(String) : [],
       autoPost: !!getSettings().autoPost,
       autoComment: !!getSettings().autoComment,
-      autoCommentN: getSettings().autoCommentN || 2,
+      autoCommentMin: getSettings().autoCommentMin != null ? getSettings().autoCommentMin : 1,
+      autoCommentMax: getSettings().autoCommentMax != null ? getSettings().autoCommentMax : 3,
+      enableArticle: getSettings().enableArticle !== false,
       chatBg: getSettings().chatBg || '',
       showFab: getSettings().showFab !== false,
       isExtension: true,
@@ -1224,7 +1374,10 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
             '<div class="wxst-set-section"><div class="wxst-set-title">朋友圈</div>' +
               '<label class="wxst-row"><input type="checkbox" id="wxst-autopost"' + (s.autoPost ? ' checked' : '') + '> AI 自动发圈：生成草稿后直接发布（不勾选 = 生成后先预览再确认）</label>' +
               '<label class="wxst-row"><input type="checkbox" id="wxst-autocomment"' + (s.autoComment ? ' checked' : '') + '> 发圈后 AI 自动让相关角色评论/点赞（不用自己逐条点）</label>' +
-              '<label>AI 评论角色数 <input id="wxst-autocomment-n" type="number" min="1" max="6" value="' + (s.autoCommentN || 2) + '"></label>' +
+              '<label>AI 评论角色数（随机，最少～最多） <input id="wxst-autocomment-min" type="number" min="0" max="8" value="' + (s.autoCommentMin != null ? s.autoCommentMin : 1) + '">～<input id="wxst-autocomment-max" type="number" min="1" max="8" value="' + (s.autoCommentMax != null ? s.autoCommentMax : 3) + '"></label>' +
+            '</div>' +
+            '<div class="wxst-set-section"><div class="wxst-set-title">公众号</div>' +
+              '<label class="wxst-row"><input type="checkbox" id="wxst-enable-article"' + (s.enableArticle !== false ? ' checked' : '') + '> 启用公众号（微信底部出现「公众号」Tab，AI 按世界观写推文、可转发到私信讨论）</label>' +
             '</div>' +
             '<details class="wxst-set-section wxst-collapse"' + ((chat.source || chat.model) ? ' open' : '') + '>' +
               '<summary class="wxst-set-title">聊天模型（默认用酒馆当前配置）</summary>' +
@@ -1386,7 +1539,13 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       };
       s.autoPost = document.getElementById('wxst-autopost').checked;
       s.autoComment = document.getElementById('wxst-autocomment').checked;
-      s.autoCommentN = Math.min(6, Math.max(1, Number(document.getElementById('wxst-autocomment-n').value) || 2));
+      var _amin = Math.max(0, Number(document.getElementById('wxst-autocomment-min').value) || 1);
+      var _amax = Math.min(8, Math.max(_amin, Number(document.getElementById('wxst-autocomment-max').value) || 3));
+      s.autoCommentMin = _amin;
+      s.autoCommentMax = _amax;
+      s.autoCommentN = _amax;
+      var eaEl = document.getElementById('wxst-enable-article');
+      if (eaEl) s.enableArticle = eaEl.checked;
       var tagEl = document.getElementById('wxst-auto-wl-tag');
       if (tagEl) s.autoWhitelistTag = String(tagEl.value || '').trim();
       var bgEl = document.getElementById('wxst-chatbg');
@@ -1435,6 +1594,10 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     deleteComment: deleteComment,
     aiComment: aiComment,
     genAutoMoment: genAutoMoment,
+    getArticles: function () { return getArticles(); },
+    publishArticle: publishArticle,
+    deleteArticle: deleteArticle,
+    genArticle: genArticle,
     listPersonas: listPersonas,
     listWorldInfos: listWorldInfos,
     getWorldInfoText: getWorldInfoText,

@@ -108,6 +108,7 @@ const Moments = (() => {
           <div class="moment-comments">${commentsHtml}</div>
           <div class="comment-actions">
             <button class="btn-comment" data-idx="${idx}">评论</button>
+            <button class="btn-share" data-idx="${idx}">分享</button>
           </div>
         </div>`;
       }).join('');
@@ -124,6 +125,9 @@ const Moments = (() => {
     });
     body.querySelectorAll('.btn-comment').forEach(btn => {
       btn.addEventListener('click', () => openCommentModal(list[Number(btn.dataset.idx)]));
+    });
+    body.querySelectorAll('.btn-share').forEach(btn => {
+      btn.addEventListener('click', () => openShareModal(list[Number(btn.dataset.idx)]));
     });
     body.querySelectorAll('.moment-del').forEach(el => {
       el.addEventListener('click', async () => {
@@ -163,6 +167,23 @@ const Moments = (() => {
     const label = document.getElementById('moments-title-label');
     if (label) label.textContent = App.displayName(character) + ' 的朋友圈';
     App.showTab('moments');
+  }
+
+  /** 从聊天卡片跳回：定位到某条朋友圈动态（清掉角色过滤，显示全部并高亮滚动） */
+  async function openPostById(id) {
+    filterKey = null;
+    filterCharName = null;
+    const label = document.getElementById('moments-title-label');
+    if (label) label.textContent = '朋友圈';
+    try { await load(); } catch (e) {}
+    App.showTab('moments');
+    await sleep(120);
+    const el = document.querySelector(`.moment-card[data-mid="${CSS.escape(id)}"]`);
+    if (el) {
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      el.classList.add('flash-highlight');
+      setTimeout(() => el.classList.remove('flash-highlight'), 2200);
+    }
   }
 
   /* ---- 发布弹层 ---- */
@@ -265,7 +286,7 @@ const Moments = (() => {
         meName: player ? (player.name || '我') : '我',
         meDesc: player ? [player.description, player.signature, player.worldbook].filter(Boolean).join('\n') : '',
       });
-      document.getElementById('moment-text').value = r.text || '';
+      document.getElementById('moment-text').value = r.text ? (window.stripActions ? window.stripActions(r.text) : r.text) : '';
       document.getElementById('moment-imgprompt').value = r.imgPrompt || '';
       tip.textContent = '草稿已生成，可修改后发布';
       tip.className = 'modal-tip';
@@ -288,7 +309,11 @@ const Moments = (() => {
   async function autoCommentMoment(post) {
     const cfg = App.state.config || {};
     if (!cfg.autoComment || !post) return;
-    const n = Math.min(6, Math.max(1, cfg.autoCommentN || 2));
+    // 评论角色数随机（最少～最多，默认 1～3；兼容旧的单值 autoCommentN 作为上限）
+    const legacyMax = Math.min(8, Math.max(1, cfg.autoCommentN || 3));
+    const minN = Math.max(0, cfg.autoCommentMin != null ? cfg.autoCommentMin : 1);
+    const maxN = Math.min(8, Math.max(minN, cfg.autoCommentMax != null ? cfg.autoCommentMax : legacyMax));
+    const n = minN + Math.floor(Math.random() * (maxN - minN + 1));
     const player = (typeof Me !== 'undefined') ? Me.activePlayer() : null;
     const rels = (player && Array.isArray(player.relations)) ? player.relations : [];
     // 关联角色优先（排除发布者自己）
@@ -348,6 +373,64 @@ const Moments = (() => {
   }
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  /* ---- 分享朋友圈到私信 ---- */
+  let sharePayloadText = '';
+  let sharePayloadCard = null;
+  function openShareModal(post) {
+    const mine = isMePost(post);
+    const text = (mine ? '我发了条朋友圈：' : (post.character ? post.character + ' 发了条朋友圈：' : '')) + (post.text || '（图片朋友圈）');
+    const card = {
+      type: 'moment',
+      id: post.id,
+      title: (post.text || '图片动态').slice(0, 60),
+      source: (mine ? '我' : (post.character || '')) + ' 的朋友圈',
+      thumb: (Array.isArray(post.img) && post.img.length) ? post.img[0] : '',
+    };
+    shareToChat(text, card);
+  }
+  /** 通用分享：把一段文本分享给某角色私信（朋友圈/公众号文章都走这里；card 用于渲染成可点击的转发卡片） */
+  function shareToChat(text, card) {
+    sharePayloadText = text || '';
+    sharePayloadCard = card || null;
+    const mask = document.getElementById('share-modal');
+    if (!mask) return;
+    const sel = document.getElementById('share-char');
+    sel.innerHTML = '<option value="">请选择…</option>' + sortedChars().map(c =>
+      `<option value="${UI.esc(App.charKey(c))}">${UI.esc(App.displayName(c))}</option>`
+    ).join('');
+    document.getElementById('share-note').value = '';
+    document.getElementById('share-tip').textContent = '';
+    mask.style.display = 'flex';
+  }
+  function closeShareModal() {
+    const m = document.getElementById('share-modal');
+    if (m) m.style.display = 'none';
+  }
+  /** 分享给某角色：打开 TA 的私信，把内容以转发卡片发过去（AI 能读到发布者与内容，并回应展开讨论） */
+  async function doShare() {
+    if (!sharePayloadText) return;
+    const sel = document.getElementById('share-char');
+    const key = sel.value;
+    if (!key) { document.getElementById('share-tip').textContent = '请选择要分享的角色'; return; }
+    const c = App.charByKey(key);
+    if (!c) { document.getElementById('share-tip').textContent = '角色不存在'; return; }
+    const note = document.getElementById('share-note').value.trim();
+    const shareText = (note ? note + '\n' : '') + '分享给你看看：\n' + sharePayloadText;
+    const tip = document.getElementById('share-tip');
+    tip.textContent = '正在打开 ' + App.displayName(c) + ' 的聊天…';
+    tip.className = 'modal-tip loading';
+    closeShareModal();
+    try {
+      await App.openCharacter(c);
+      await sleep(400); // 等聊天页加载完成
+      await Chat.send(shareText, sharePayloadCard ? { card: sharePayloadCard } : undefined);
+      UI.toast('已分享给 ' + App.displayName(c));
+      // 停留聊天页（自动跳转过去），让用户看 AI 回应
+    } catch (e) {
+      UI.toast('分享失败：' + (e && e.message || e));
+    }
+  }
 
   /* ---- 评论弹层 ---- */
   let commentTarget = null;
@@ -438,7 +521,7 @@ const Moments = (() => {
     tip.className = 'modal-tip loading';
     try {
       const r = await API.aiComment({ momentId: commentTarget.id, character, characterName, momentText: commentTarget.text, isMe: who === 'me' });
-      document.getElementById('comment-text').value = r.text || '';
+      document.getElementById('comment-text').value = r.text ? (window.stripActions ? window.stripActions(r.text) : r.text) : '';
       tip.textContent = '已生成，点「发送」确认';
       tip.className = 'modal-tip';
     } catch (e) {
@@ -518,7 +601,7 @@ const Moments = (() => {
       const recentChat = await recentChatOf(character);
       const imgTag = imgTagOf(character);
       const r = await API.genAutoMoment({ character, characterName: App.displayName(c), recentChat, hint, imgTag });
-      document.getElementById('aim-text').value = r.text || '';
+      document.getElementById('aim-text').value = r.text ? (window.stripActions ? window.stripActions(r.text) : r.text) : '';
       document.getElementById('aim-img').value = r.imgPrompt || '';
       setAiTip('草稿已生成，可修改后发布', '');
       const autoPost = !!(App.state.config && App.state.config.autoPost);
@@ -610,6 +693,11 @@ const Moments = (() => {
     document.getElementById('comment-submit').addEventListener('click', submitComment);
     document.getElementById('comment-ai').addEventListener('click', aiComment);
     document.querySelectorAll('#comment-who .seg-btn').forEach(b => b.addEventListener('click', () => setCommentWho(b.dataset.who)));
+    document.getElementById('share-cancel').addEventListener('click', closeShareModal);
+    document.getElementById('share-ok').addEventListener('click', doShare);
+    document.getElementById('share-modal').addEventListener('click', e => {
+      if (e.target.id === 'share-modal') closeShareModal();
+    });
     document.getElementById('aim-cancel').addEventListener('click', closeAiMomentModal);
     document.getElementById('aim-gen').addEventListener('click', genAiDraft);
     document.getElementById('aim-publish').addEventListener('click', submitAiPublish);
@@ -625,5 +713,5 @@ const Moments = (() => {
     });
   }
 
-  return { render, load, init, openFor };
+  return { render, load, init, openFor, openPostById, shareToChat };
 })();

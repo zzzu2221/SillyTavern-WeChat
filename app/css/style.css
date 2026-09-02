@@ -279,6 +279,77 @@ body {
 .comment-actions { display: flex; justify-content: flex-end; gap: 16px; margin-top: 6px; }
 .comment-actions button { border: none; background: none; color: #576b95; font-size: 13px; cursor: pointer; padding: 4px; }
 
+/* ============ 公众号 ============ */
+.article-card {
+  display: flex; gap: 12px; align-items: center;
+  background: #fff; padding: 14px;
+  border-bottom: 1px solid #f0f0f0; cursor: pointer;
+  position: relative;
+}
+.article-card:active { background: #f7f7f7; }
+.article-avatar {
+  width: 44px; height: 44px; border-radius: 8px; overflow: hidden; flex-shrink: 0;
+  background: #eee;
+}
+.article-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.article-main { flex: 1; min-width: 0; padding-right: 22px; }
+.article-title { font-size: 15px; font-weight: 600; color: #222; line-height: 1.4; }
+.article-summary { font-size: 13px; color: #888; margin-top: 4px; line-height: 1.4; word-break: break-word; }
+.article-meta { font-size: 12px; color: #aaa; margin-top: 6px; display: flex; gap: 8px; }
+.article-del {
+  position: absolute; top: 10px; right: 10px;
+  color: #999; font-size: 15px; padding: 2px 6px; cursor: pointer; z-index: 2;
+}
+.article-del:active { color: #576b95; }
+
+/* 公众号阅读页 */
+.article-read-body { background: #fff; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.article-read { padding: 24px 18px 48px; }
+.article-read-head { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+.article-read-avatar { width: 40px; height: 40px; border-radius: 8px; overflow: hidden; background: #eee; flex-shrink: 0; }
+.article-read-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.article-read-name { font-size: 14px; color: #576b95; font-weight: 600; }
+.article-read-time { font-size: 12px; color: #aaa; margin-top: 2px; }
+.article-read-title { font-size: 21px; font-weight: 700; color: #111; line-height: 1.45; margin: 0 0 18px; }
+.article-read-content { font-size: 15px; color: #333; line-height: 1.85; word-break: break-word; }
+
+/* 公众号默认图标占位（AI 拟名，不用角色头像） */
+.article-avatar-icon { font-size: 24px; line-height: 1; }
+
+/* ============ 转发卡片（朋友圈 / 公众号分享到私信，微信式独立卡片） ============ */
+.msg-row.card-msg { align-items: flex-end; }
+.msg-row.user.card-msg .msg-col { align-items: flex-end; }
+.msg-row.ai.card-msg .msg-col { align-items: flex-start; }
+.chat-card {
+  display: flex; align-items: center; gap: 10px;
+  min-width: 200px; max-width: 252px;
+  background: #fff; border-radius: 8px; cursor: pointer;
+  border: 0.5px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.07);
+  padding: 8px 10px;
+}
+.chat-card:active { opacity: .85; }
+.chat-card-thumb {
+  width: 52px; height: 52px; flex-shrink: 0;
+  border-radius: 4px; background: #f2f2f2;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden; position: relative;
+}
+.chat-card-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.chat-card-thumb .chat-card-thumb-fallback { display: none; font-size: 24px; }
+.chat-card-thumb img[style*="display: none"] ~ .chat-card-thumb-fallback { display: flex; }
+.chat-card-main { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 6px; }
+.chat-card-title {
+  font-size: 13px; font-weight: 600; color: #222; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  word-break: break-all;
+}
+.chat-card-source { font-size: 11px; color: #999; }
+
+/* 朋友圈跳转高亮 */
+.flash-highlight { animation: flashHighlight 1.4s ease; }
+@keyframes flashHighlight { 0% { background: #fff3c4; } 100% { background: transparent; } }
+
 /* ============ 弹层 ============ */
 .modal-mask {
   position: fixed; inset: 0; z-index: 200;
@@ -488,6 +559,17 @@ body {
 .upload-preview-cover { max-width: 160px; max-height: 70px; object-fit: cover; }
 .wb-pick { display: flex; gap: 8px; margin-bottom: 6px; }
 .wb-pick select { flex: 1; font-size: 13px; padding: 8px; border: 1px solid #e0e0e0; border-radius: 4px; background: #fff; }
+.wb-mounted { margin-bottom: 6px; display: flex; flex-direction: column; gap: 6px; }
+.wb-mounted-empty { font-size: 12px; color: #999; background: #f7f7f7; border-radius: 8px; padding: 8px 10px; }
+.wb-mounted-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  border: 1px solid #e0e0e0; border-radius: 8px; padding: 8px 10px; background: #fafafa;
+}
+.wb-mounted-name { font-size: 13px; font-weight: 600; color: #111; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-mounted-ops { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.wb-mounted-count { font-size: 11px; color: #888; }
+.wb-mounted-ops .wb-mini { font-size: 12px; padding: 2px 8px; }
+.wb-pick-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #f0f0f0; border-radius: 8px; background: #fff; font-size: 13px; color: #111; cursor: pointer; }
 
 /* ===== 关联角色（微信列表风格） ===== */
 .acct-rel-list { display: flex; flex-direction: column; gap: 8px; }

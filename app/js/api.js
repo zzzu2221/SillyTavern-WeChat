@@ -53,6 +53,12 @@ const API = (() => {
     aiComment: (data) => requireBridge().aiComment(data),
     genAutoMoment: (data) => requireBridge().genAutoMoment(data),
 
+    /* --- 公众号 --- */
+    getArticles: () => requireBridge().getArticles(),
+    publishArticle: (data) => requireBridge().publishArticle(data),
+    deleteArticle: (id) => requireBridge().deleteArticle(id),
+    genArticle: (data) => requireBridge().genArticle(data),
+
     /* --- 设置 --- */
     getSettings: () => requireBridge().getSettings(),
     saveAppSettings: (patch) => { requireBridge().saveAppSettings(patch || {}); return true; },

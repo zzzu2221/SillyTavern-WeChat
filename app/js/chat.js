@@ -101,9 +101,14 @@ const Chat = (() => {
       const showTime = !lastTime || (t && Math.abs(new Date(t) - new Date(lastTime)) > 5 * 60 * 1000);
       if (showTime && t) html += `<div class="msg-time">${UI.fmtTime(t)}</div>`;
       lastTime = t || lastTime;
+      const chatIndex = mi + 1; // ctx.chat 中实际下标（下标 0 是 meta）
+      // 转发卡片消息：单条卡片渲染，点击跳回原文
+      if (m.extra && m.extra.card) {
+        html += cardRowHtml(isUser, ctx.char, m, chatIndex);
+        continue;
+      }
       const bubbles = splitBubbles(m.mes);
       if (!bubbles.length) continue;
-      const chatIndex = mi + 1; // ctx.chat 中实际下标（下标 0 是 meta）
       // 每条气泡独立成一行、各自带头像（仿微信连续发多条）
       for (const b of bubbles) {
         html += rowHtml(isUser, ctx.char, b, chatIndex);
@@ -117,7 +122,43 @@ const Chat = (() => {
       html = `<div class="msg-time">新会话开始啦，说点什么吧</div>`;
     }
     body.innerHTML = html;
+    // 转发卡片点击：跳回原文（朋友圈 / 公众号）
+    body.querySelectorAll('.chat-card').forEach(card => {
+      card.addEventListener('click', () => openCard(card.dataset.cardType, card.dataset.cardId));
+    });
     scrollBottom();
+  }
+
+  /** 转发卡片消息行（朋友圈 / 公众号分享到私信，微信式：独立卡片，左缩略图 + 右标题/来源，不套气泡） */
+  function cardRowHtml(isUser, char, m, chatIndex) {
+    const avatar = isUser ? userAvatarHtml() : charAvatarHtml(char);
+    const card = (m.extra && m.extra.card) || {};
+    const title = UI.esc(card.title || '');
+    const source = UI.esc(card.source || '');
+    const thumb = UI.esc(card.thumb || '');
+    const thumbHtml = thumb
+      ? `<img src="${thumb}" onerror="this.style.display='none'"><span class="chat-card-thumb-fallback">${card.type === 'article' ? '📰' : '🌐'}</span>`
+      : `<span class="chat-card-thumb-fallback">${card.type === 'article' ? '📰' : '🌐'}</span>`;
+    return `<div class="msg-row ${isUser ? 'user' : 'ai'} card-msg" data-i="${chatIndex}">${avatar}
+      <div class="msg-col">
+        <div class="chat-card" data-card-type="${UI.esc(card.type || '')}" data-card-id="${UI.esc(card.id || '')}">
+          <div class="chat-card-thumb">${thumbHtml}</div>
+          <div class="chat-card-main">
+            <div class="chat-card-title">${title}</div>
+            <div class="chat-card-source">${source}</div>
+          </div>
+        </div>
+      </div></div>`;
+  }
+
+  /** 卡片点击：跳回原文（朋友圈 / 公众号阅读页） */
+  function openCard(type, id) {
+    if (!id) return;
+    if (type === 'article') {
+      try { Articles.openReadById(id); } catch (e) { UI.toast('无法打开推文：' + (e && e.message)); }
+    } else if (type === 'moment') {
+      try { Moments.openPostById(id); } catch (e) { UI.toast('无法打开朋友圈：' + (e && e.message)); }
+    }
   }
 
   /** 生成一行消息：头像 + 单气泡（data-i 指向 ctx.chat 下标，供长按操作定位） */
@@ -126,8 +167,9 @@ const Chat = (() => {
   function stripActions(text) {
     let s = String(text || '');
     s = s.replace(/\*[^*]*\*/g, '');
-    s = s.replace(/^[（(【\[]([^）)】\]]{1,30})[）)】\]]$/, '$1');
-    s = s.replace(/[（(【\[]([^）)】\]]{1,20})[）)】\]]/g, '');
+    // 整条都是括号（纯动作/表情/旁白）→ 丢弃不显示（AI 跑偏时防止刷屏动作）
+    if (/^[（(【\[]+[^）)】\]]{1,60}[）)】\]]+$/.test(s.trim())) return '';
+    s = s.replace(/[（(【\[]([^）)】\]]{1,40})[）)】\]]/g, '');
     return s.replace(/\s{2,}/g, ' ').trim();
   }
   window.stripActions = stripActions; // 供朋友圈等模块复用（清洗动作/心理括号）
@@ -235,7 +277,7 @@ const Chat = (() => {
     if (c.scenario) parts.push(`场景：${c.scenario}`);
     parts.push(`请始终以「${c.name}」的身份、第一人称与我对话，贴合设定，不要跳出角色。`);
     // 微信多气泡输出格式（兜底注入：不依赖酒馆世界书挂载，对所有角色生效）
-    parts.push('【微信消息输出格式·必须遵守】我们在微信里聊天，真人聊天是「想到一句发一句」，只发说出口的话。当你的回复包含 2 个及以上独立的意思、转折或想分条强调的内容时，用「|||」分隔成多条消息逐条发出；每条消息为短句、口语化，通常一两句，最多三句。一个「|||」代表换一条新消息，前后不要加空格；「|||」只用于分隔消息，不要在普通句子里使用，更不要用换行、逗号、波浪线「～」等代替它。只有一句话能说完时不要硬拆。每条消息都要贴合你当前角色的性格和语气。绝对禁止：任何动作、表情、神态、心理描写或旁白，不要用括号、星号标注任何动作，只输出角色说出口的话。正确：哟～晚上好呀；错误：(摘下墨镜，笑了笑)哟～晚上好呀；错误：*笑了笑*晚上好。');
+    parts.push('【微信消息输出格式·必须遵守】我们在微信里聊天，真人聊天是「想到一句发一句」，只发说出口的话。当你的回复包含 2 个及以上独立的意思、转折或想分条强调的内容时，用「|||」分隔成多条消息逐条发出；每条消息为短句、口语化，通常一两句，最多三句。一个「|||」代表换一条新消息，前后不要加空格；「|||」只用于分隔消息，不要在普通句子里使用，更不要用换行、逗号、波浪线「～」等代替它。只有一句话能说完时不要硬拆。每条消息都要贴合你当前角色的性格和语气。绝对禁止：任何动作、表情、神态、心理描写或旁白，例如不要写「摘下墨镜笑了笑」、不要写「轻叹一声」、不要写「递过纸巾」这类描述，只输出角色说出口的话。正确示例：哟～晚上好呀。当对方只发来表情、一个问号或很短的追问时，要针对性地自然回应对方说的内容，绝对不要机械重复自己刚说过的话。');
     return parts.join('\n');
   }
 
@@ -300,19 +342,20 @@ const Chat = (() => {
     }
   }
 
-  async function send(text) {
+  async function send(text, extra) {
     text = (text || '').trim();
     if (!text || ctx.busy) return;
     const input = document.getElementById('chat-input');
     input.value = '';
     autoResize(input);
-    // 追加用户消息
+    // 追加用户消息（extra 用于卡片转发等元数据）
     ctx.chat.push({
       name: 'user',
       is_user: true,
       is_name: true,
       send_date: new Date().toISOString(),
       mes: text,
+      ...(extra ? { extra } : {}),
     });
     await askAI();
   }
@@ -397,7 +440,7 @@ const Chat = (() => {
     ctx.chat.splice(chatIndex, end - chatIndex, { name: 'system', is_user: false, is_system: true, send_date: new Date().toISOString(), mes: 'recalled' });
     await persistChat();
     render();
-    await askAI('（系统事件：对方刚刚悄悄撤回了自己发的一条消息，没有补发任何内容。你注意到了这个撤回。请用纯对话自然地回应，可以打趣、好奇，或者表示“我已经看到了哦”，一两句即可，符合你的性格。注意：只输出说出口的话，绝对不要写任何动作、表情、神态或心理描写。）');
+    await askAI('对方刚刚悄悄撤回了自己发的一条消息，没有补发任何内容。你注意到了这个撤回，自然地回应一句即可，可以打趣、好奇，或者表示我已经看到了哦。只用说出口的话，绝对不要括号、动作、表情、神态或心理描写。如果想说两三句，就按微信消息格式用「|||」分隔成多条。');
   }
 
   /** 删除：移除该条消息 */

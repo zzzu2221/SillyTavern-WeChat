@@ -45,6 +45,17 @@
       <div class="page-body" id="moments-body"></div>
     </div>
 
+    <!-- 公众号 -->
+    <div class="page" id="page-articles" style="display:none">
+      <header class="page-header">
+        <div class="header-title">公众号</div>
+        <div class="header-actions">
+          <button class="icon-btn" id="btn-article-add" title="AI 写推文">🤖</button>
+        </div>
+      </header>
+      <div class="page-body" id="articles-body"></div>
+    </div>
+
     <!-- 我 -->
     <div class="page" id="page-me">
       <header class="page-header">
@@ -114,6 +125,19 @@
       </header>
       <div class="page-body" id="account-body"></div>
     </div>
+
+    <!-- 公众号阅读页 -->
+    <div class="page page-full" id="page-article-read" style="display:none">
+      <header class="page-header">
+        <button class="icon-btn" id="btn-article-back">‹</button>
+        <div class="header-title" id="article-read-title">推文</div>
+        <div class="header-actions">
+          <button class="icon-btn" id="btn-article-share" title="分享到私信">↗</button>
+          <button class="icon-btn" id="btn-article-del" title="删除">✕</button>
+        </div>
+      </header>
+      <div class="page-body article-read-body" id="article-read-body"></div>
+    </div>
   </div>
 
   <!-- 底部 Tab -->
@@ -121,6 +145,7 @@
     <div class="tab-item" data-tab="chatlist"><span class="tab-icon">💬</span><span class="tab-label">微信</span></div>
     <div class="tab-item" data-tab="contacts"><span class="tab-icon">👥</span><span class="tab-label">通讯录</span></div>
     <div class="tab-item" data-tab="moments"><span class="tab-icon">🌐</span><span class="tab-label">朋友圈</span></div>
+    <div class="tab-item" id="tab-articles" data-tab="articles"><span class="tab-icon">📰</span><span class="tab-label">公众号</span></div>
     <div class="tab-item" data-tab="me"><span class="tab-icon">👤</span><span class="tab-label">我</span></div>
   </nav>
 
@@ -306,18 +331,39 @@
       <div class="modal-field"><label>关联角色与关系（和哪些角色是什么关系）</label>
         <div class="acct-relations" id="acct-relations"></div>
       </div>
-      <div class="modal-field"><label>世界书 / 我的设定</label>
+      <div class="modal-field"><label>世界书 / 我的设定（可挂多个世界书，像酒馆本体那样逐个勾选条目）</label>
         <div class="wb-pick">
-          <select id="acct-wb-select"><option value="">从已导入世界书选择…</option></select>
-          <button type="button" class="btn-plain" id="acct-wb-load" style="display:none">加载所选</button>
+          <button type="button" class="btn-plain" id="acct-wb-add">＋ 挂载世界书</button>
+          <button type="button" class="btn-plain" id="acct-wb-clear" style="display:none">全部移除</button>
         </div>
-        <textarea id="acct-wb" rows="4" placeholder="选择世界书后自动填入，也可手写：例如 我是五条悟的女友…"></textarea>
+        <div class="wb-mounted" id="acct-wb-mounted"></div>
+        <textarea id="acct-wb" rows="3" placeholder="自动由挂载的世界书生成，也可手写补充：例如 我是五条悟的女友…"></textarea>
       </div>
       <div class="modal-actions">
         <button class="btn-plain" id="acct-cancel">取消</button>
         <button class="btn-primary" id="acct-save">保存</button>
       </div>
       <div class="modal-tip" id="acct-tip"></div>
+    </div>
+  </div>
+
+  <!-- 分享到私信弹层 -->
+  <div class="modal-mask" id="share-modal" style="display:none">
+    <div class="modal-card">
+      <div class="modal-title">分享到私信</div>
+      <div class="modal-field">
+        <label>分享给谁</label>
+        <select id="share-char"></select>
+      </div>
+      <div class="modal-field">
+        <label>附带的话（可选）</label>
+        <input id="share-note" placeholder="例如：快看这个！">
+      </div>
+      <div class="modal-actions">
+        <button class="btn-plain" id="share-cancel">取消</button>
+        <button class="btn-primary" id="share-ok">分享</button>
+      </div>
+      <div class="modal-tip" id="share-tip"></div>
     </div>
   </div>
 
@@ -352,6 +398,19 @@
     </div>
   </div>
 
+  <!-- 世界书挂载弹层（多选） -->
+  <div class="modal-mask" id="wb-pick-modal" style="display:none">
+    <div class="modal-card modal-card-tall">
+      <div class="modal-title">挂载世界书</div>
+      <div class="wb-entries-hint">勾选要挂载到当前账号的世界书（可多选）；挂载后可逐个勾选要启用的条目</div>
+      <div class="wb-entries-list" id="wb-pick-list"></div>
+      <div class="modal-actions">
+        <button class="btn-plain" id="wb-pick-cancel">取消</button>
+        <button class="btn-primary" id="wb-pick-ok">确定挂载</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 同意新朋友时选关系弹层 -->
   <div class="modal-mask" id="friend-rel-modal" style="display:none">
     <div class="modal-card">
@@ -369,18 +428,48 @@
       <div class="modal-tip" id="fr-tip"></div>
     </div>
   </div>
+
+  <!-- AI 写公众号推文弹层 -->
+  <div class="modal-mask" id="article-modal" style="display:none">
+    <div class="modal-card">
+      <div class="modal-title">🤖 AI 写公众号推文</div>
+      <div class="modal-field">
+        <label>本期主题 / 灵感（比如：新宿甜品店探店、涩谷夜生活指南、五条家新任家主的八卦…）</label>
+        <textarea id="art-hint" rows="2" placeholder="例如：新宿甜品店探店攻略"></textarea>
+      </div>
+      <div class="modal-field">
+        <label>公众号名称（AI 生成后可修改）</label>
+        <input id="art-author" placeholder="点击「✨ 生成」后自动填写">
+      </div>
+      <div class="modal-field">
+        <label>AI 生成的标题（可修改）</label>
+        <input id="art-title" placeholder="点击「✨ 生成」后自动填写">
+      </div>
+      <div class="modal-field">
+        <label>正文（可修改）</label>
+        <textarea id="art-body" rows="6" placeholder="点击「✨ 生成」后自动填写"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-plain" id="art-cancel">取消</button>
+        <button class="btn-plain" id="art-gen">✨ 生成</button>
+        <button class="btn-primary" id="art-publish">📤 发布</button>
+      </div>
+      <div class="modal-tip" id="art-tip"></div>
+    </div>
+  </div>
 </div>
 
-<script src="js/api.js"></script>
-<script src="js/store.js"></script>
-<script src="js/ui.js"></script>
-<script src="js/app.js"></script>
-<script src="js/contacts.js"></script>
-<script src="js/chatlist.js"></script>
-<script src="js/chat.js"></script>
-<script src="js/detail.js"></script>
-<script src="js/moments.js"></script>
-<script src="js/friends.js"></script>
-<script src="js/me.js"></script>
+<script src="js/api.js?v=2026090315"></script>
+<script src="js/store.js?v=2026090315"></script>
+<script src="js/ui.js?v=2026090315"></script>
+<script src="js/app.js?v=2026090315"></script>
+<script src="js/contacts.js?v=2026090315"></script>
+<script src="js/chatlist.js?v=2026090315"></script>
+<script src="js/chat.js?v=2026090315"></script>
+<script src="js/detail.js?v=2026090315"></script>
+<script src="js/moments.js?v=2026090315"></script>
+<script src="js/articles.js?v=2026090315"></script>
+<script src="js/friends.js?v=2026090315"></script>
+<script src="js/me.js?v=2026090315"></script>
 </body>
 </html>

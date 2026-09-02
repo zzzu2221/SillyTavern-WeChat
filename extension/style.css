@@ -185,3 +185,7 @@
 #wxst-settings .wxst-preset input, #wxst-settings .wxst-preset textarea { color: #111; font-size: 14px; }
 #wxst-settings .wxst-mini-btn, #wxst-settings .wxst-btn { font-size: 14px; color: #07c160; }
 #wxst-settings .wxst-btn-primary { color: #fff; }
+
+/* 覆盖酒馆主题可能施加的文字阴影，避免模糊阴影导致看不清 */
+#wxst-settings, #wxst-settings * { text-shadow: none !important; }
+#wxst-settings input, #wxst-settings textarea, #wxst-settings select { box-shadow: none !important; }

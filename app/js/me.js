@@ -274,42 +274,117 @@ const Me = (() => {
     document.getElementById('btn-account-back').onclick = () => App.showTab('me');
   }
 
-  /** 世界书条目勾选弹层：勾选启用条目，注入「我的设定」 */
+  /* ================= 世界书挂载（多选 + 条目勾选，存 wbSel） ================= */
+  /* 编辑中的挂载状态：{ [fileId]: { name, uids: ['*'] | [uid...] } }；* = 全部启用 */
+  let acctWbSel = {};
+
+  function renderWbMounted() {
+    const box = document.getElementById('acct-wb-mounted');
+    if (!box) return;
+    const clear = document.getElementById('acct-wb-clear');
+    const keys = Object.keys(acctWbSel);
+    if (!keys.length) {
+      box.innerHTML = '<div class="wb-mounted-empty">未挂载世界书（点「＋ 挂载世界书」从酒馆导入选择）</div>';
+      if (clear) clear.style.display = 'none';
+      return;
+    }
+    box.innerHTML = keys.map(fid => {
+      const s = acctWbSel[fid] || {};
+      const uids = s.uids || ['*'];
+      const cnt = (uids.length === 1 && uids[0] === '*') ? '全部条目' : (uids.length + ' 条');
+      return `<div class="wb-mounted-item" data-fid="${UI.esc(fid)}">
+        <div class="wb-mounted-name" title="${UI.esc(s.name || fid)}">${UI.esc(s.name || fid)}</div>
+        <div class="wb-mounted-ops">
+          <span class="wb-mounted-count">${cnt}</span>
+          <button type="button" class="btn-plain wb-mini" data-act="entries">条目</button>
+          <button type="button" class="btn-plain wb-mini" data-act="remove">移除</button>
+        </div>
+      </div>`;
+    }).join('');
+    if (clear) clear.style.display = 'inline-block';
+  }
+
+  /** 挂载弹层：多选世界书 */
+  async function openWbPick() {
+    const modal = document.getElementById('wb-pick-modal');
+    const list = document.getElementById('wb-pick-list');
+    list.innerHTML = '<div class="pa-loading">读取世界书…</div>';
+    modal.style.display = 'flex';
+    let infos = [];
+    try { infos = await API.listWorldInfos(); } catch (e) { list.innerHTML = '<div class="empty small">读取失败：' + UI.esc(e.message) + '</div>'; return; }
+    if (!infos.length) { list.innerHTML = '<div class="empty small">尚未导入世界书，请先在酒馆「世界观」里创建</div>'; return; }
+    list.innerHTML = infos.map((w, i) => {
+      const on = !!acctWbSel[w.id];
+      return `<label class="wb-pick-item">
+        <input type="checkbox" data-i="${i}"${on ? ' checked' : ''}>
+        <span>${UI.esc(w.name)}${on ? '（已挂载）' : ''}</span>
+      </label>`;
+    }).join('');
+    document.getElementById('wb-pick-cancel').onclick = () => { modal.style.display = 'none'; };
+    modal.onclick = (e) => { if (e.target === modal) modal.style.display = 'none'; };
+    document.getElementById('wb-pick-ok').onclick = () => {
+      const chosen = [];
+      list.querySelectorAll('input[type="checkbox"]').forEach(cb => { if (cb.checked) chosen.push(infos[Number(cb.dataset.i)]); });
+      const keep = {};
+      chosen.forEach(w => { keep[w.id] = acctWbSel[w.id] || { name: w.name, uids: ['*'] }; });
+      acctWbSel = keep;
+      modal.style.display = 'none';
+      renderWbMounted();
+      UI.toast('已挂载 ' + chosen.length + ' 个世界书');
+    };
+  }
+
+  /** 世界书条目勾选弹层：勾选启用条目（持久化到 acctWbSel[fileId].uids） */
+  function entryUid(en) { return (en && en.uid != null) ? en.uid : (en && en.id != null ? en.id : null); }
   async function openWbEntries(fileId) {
     if (!fileId) { UI.toast('请先选择世界书'); return; }
     const modal = document.getElementById('wb-entries-modal');
     const list = document.getElementById('wb-entries-list');
-    const wbSel2 = document.getElementById('acct-wb-select');
-    document.getElementById('wb-entries-name').textContent = '（' + (wbSel2.selectedOptions[0] && wbSel2.selectedOptions[0].textContent || '') + '）';
+    const s = acctWbSel[fileId] || {};
+    const selUids = s.uids || ['*'];
+    document.getElementById('wb-entries-name').textContent = '（' + (s.name || '') + '）';
     list.innerHTML = '<div class="pa-loading">加载世界书条目…</div>';
     modal.style.display = 'flex';
     let entries = [];
     try { entries = await API.getWorldInfoEntries(fileId); } catch (e) { list.innerHTML = '<div class="empty small">加载失败：' + UI.esc(e.message) + '</div>'; return; }
     if (!entries.length) { list.innerHTML = '<div class="empty small">这个世界书没有条目</div>'; return; }
-    list.innerHTML = entries.map((en, i) => `
-      <label class="wb-entry">
-        <input type="checkbox" data-i="${i}"${en.enabled ? ' checked' : ''}>
+    list.innerHTML = entries.map((en, i) => {
+      const checked = (selUids.length === 1 && selUids[0] === '*') ? en.enabled : selUids.includes(entryUid(en));
+      return `<label class="wb-entry">
+        <input type="checkbox" data-i="${i}"${checked ? ' checked' : ''}>
         <div class="wb-entry-body">
           <div class="wb-entry-comment">${UI.esc(en.comment || '(无注释)')}</div>
           <div class="wb-entry-preview">${UI.esc(en.content.slice(0, 80))}${en.content.length > 80 ? '…' : ''}</div>
         </div>
-      </label>
-    `).join('');
+      </label>`;
+    }).join('');
     document.getElementById('wb-entries-cancel').onclick = () => { modal.style.display = 'none'; };
     modal.onclick = (e) => { if (e.target === modal) modal.style.display = 'none'; };
     document.getElementById('wb-entries-ok').onclick = () => {
-      const texts = [];
+      const uids = [];
       list.querySelectorAll('.wb-entry input[type="checkbox"]').forEach(cb => {
-        if (cb.checked) {
-          const en = entries[Number(cb.dataset.i)];
-          if (en && en.content) texts.push(en.content);
-        }
+        if (cb.checked) { const en = entries[Number(cb.dataset.i)]; const uid = entryUid(en); if (uid != null) uids.push(uid); }
       });
-      const wb = document.getElementById('acct-wb');
-      wb.value = (wb.value.trim() ? wb.value.trim() + '\n' : '') + texts.join('\n');
+      if (acctWbSel[fileId]) acctWbSel[fileId].uids = uids;
       modal.style.display = 'none';
-      UI.toast('已载入 ' + texts.length + ' 条勾选条目');
+      renderWbMounted();
+      UI.toast('已勾选 ' + uids.length + ' 条条目');
     };
+  }
+
+  /** 根据挂载选择拼接世界书正文 */
+  async function buildWorldbookText(sel) {
+    const parts = [];
+    for (const fid of Object.keys(sel || {})) {
+      const s = sel[fid] || {};
+      const uids = s.uids || ['*'];
+      let entries = [];
+      try { entries = await API.getWorldInfoEntries(fid); } catch (e) { continue; }
+      let chosen = entries;
+      if (!(uids.length === 1 && uids[0] === '*')) chosen = entries.filter(en => uids.includes(entryUid(en)));
+      chosen.forEach(en => { if (en.content) parts.push(en.content); });
+    }
+    return parts.join('\n');
   }
 
   /* ---------- 账号编辑（头像 / 封面 / 关系 / 世界书） ---------- */
@@ -352,36 +427,43 @@ const Me = (() => {
       document.getElementById('acct-cover-file').value = '';
       UI.toast('已选择封面');
     };
-    // 世界书选择 → 点「加载所选」打开条目勾选弹层
-    const wbSel = document.getElementById('acct-wb-select');
-    const wbLoad = document.getElementById('acct-wb-load');
-    API.listWorldInfos().then(list2 => {
-      wbSel.innerHTML = '<option value="">从已导入世界书选择…</option>' + list2.map(w =>
-        `<option value="${UI.esc(w.id)}">${UI.esc(w.name)}</option>`
-      ).join('');
-    }).catch(() => { wbSel.innerHTML = '<option value="">（读取世界书失败）</option>'; });
-    wbSel.onchange = () => {
-      wbLoad.style.display = wbSel.value ? 'inline-block' : 'none';
+    // 世界书挂载（多选）：恢复已挂载状态并渲染列表
+    acctWbSel = Object.assign({}, p.wbSel || {});
+    renderWbMounted();
+    document.getElementById('acct-wb-add').onclick = openWbPick;
+    const wbMountedBox = document.getElementById('acct-wb-mounted');
+    wbMountedBox.onclick = (e) => {
+      const btn = e.target.closest('button[data-act]');
+      if (!btn) return;
+      const item = btn.closest('.wb-mounted-item');
+      const fid = item && item.dataset.fid;
+      if (!fid) return;
+      if (btn.dataset.act === 'entries') openWbEntries(fid);
+      else if (btn.dataset.act === 'remove') { delete acctWbSel[fid]; renderWbMounted(); }
     };
-    wbLoad.addEventListener('click', () => openWbEntries(wbSel.value));
+    document.getElementById('acct-wb-clear').onclick = () => { acctWbSel = {}; renderWbMounted(); };
     renderRelations(p);
     modal.style.display = 'flex';
     document.getElementById('acct-cancel').onclick = () => { modal.style.display = 'none'; };
     modal.onclick = (e) => { if (e.target === modal) modal.style.display = 'none'; };
-    document.getElementById('acct-save').onclick = () => {
+    document.getElementById('acct-save').onclick = async () => {
       const name = document.getElementById('acct-name').value.trim() || '未命名';
       const signature = document.getElementById('acct-sig').value.trim();
       const description = document.getElementById('acct-desc').value.trim();
-      const worldbook = document.getElementById('acct-wb').value.trim();
+      const manualWb = document.getElementById('acct-wb').value.trim();
+      const wbSel = acctWbSel;
+      const mountedText = await buildWorldbookText(wbSel);
+      const worldbook = [mountedText, manualWb].filter(Boolean).join('\n');
       const relations = collectRelations();
       const avatar = acctPicker.get();
       const coverData = document.getElementById('acct-cover-file').dataset.value;
       const cover = coverData || p.cover || '';
+      const merged = { name, signature, description, worldbook, wbSel, relations, avatar, cover };
       if (isNew) {
-        list.push(Object.assign({}, p, { name, signature, description, worldbook, relations, avatar, cover }));
+        list.push(Object.assign({}, p, merged));
         savePlayers(list, p.id);
       } else {
-        savePlayers(list.map(x => x.id === p.id ? Object.assign({}, x, { name, signature, description, worldbook, relations, avatar, cover }) : x), p.id);
+        savePlayers(list.map(x => x.id === p.id ? Object.assign({}, x, merged) : x), p.id);
       }
       modal.style.display = 'none';
       UI.toast('已保存');
