@@ -91,10 +91,10 @@ const Moments = (() => {
           ? `<div class="moment-img-wrap"><img src="${UI.esc(p.img)}" class="moment-img" data-src="${UI.esc(p.img)}" loading="lazy"></div>`
           : '';
         const commentsHtml = (p.comments || []).map(cm =>
-          `<div class="comment-item"><span class="cname">${UI.esc(cm.character)}</span>：${UI.esc(cm.text)}<span class="comment-del" data-idx="${idx}" data-time="${UI.esc(cm.time)}" data-key="${UI.esc(cm.key || '')}">✕</span></div>`
+          `<div class="comment-item"><span class="cname">${UI.esc(cm.character)}</span>：${UI.esc(window.stripActions ? window.stripActions(cm.text) : cm.text)}<span class="comment-del" data-idx="${idx}" data-time="${UI.esc(cm.time)}" data-key="${UI.esc(cm.key || '')}">✕</span></div>`
         ).join('');
         return `
-        <div class="moment-card" data-idx="${idx}">
+        <div class="moment-card" data-idx="${idx}" data-mid="${UI.esc(p.id)}">
           <div class="moment-head">
             <div class="avatar">${avatar}</div>
             <div>
@@ -103,7 +103,7 @@ const Moments = (() => {
             </div>
             ${`<span class="moment-del" data-idx="${idx}" title="删除这条动态">⋯</span>`}
           </div>
-          ${p.text ? `<div class="moment-text">${UI.esc(p.text).replace(/\n/g, '<br>')}</div>` : ''}
+          ${p.text ? `<div class="moment-text">${UI.esc(window.stripActions ? window.stripActions(p.text) : p.text).replace(/\n/g, '<br>')}</div>` : ''}
           ${imgHtml}
           <div class="moment-comments">${commentsHtml}</div>
           <div class="comment-actions">
@@ -304,10 +304,15 @@ const Moments = (() => {
     for (const c of picked) {
       try {
         const rel = rels.find(r => r.key === App.charKey(c));
-        const r = await API.aiComment({ momentId: post.id, character: App.charKey(c), characterName: App.displayName(c), momentText: post.text || '', relation: rel ? (rel.relation || '') : '' });
+        const r = await API.aiComment({ momentId: post.id, character: App.charKey(c), characterName: App.displayName(c), momentText: post.text || '', posterName: post.character || '', relation: rel ? (rel.relation || '') : '' });
         if (r && r.text) {
           await API.addComment({ momentId: post.id, character: App.charKey(c), characterName: App.displayName(c), text: r.text });
           okCount++;
+          // 本地数据 + 局部渲染：一条一条带随机间隔弹出（仿聊天逐条）
+          const cm = { character: App.displayName(c), text: r.text, time: new Date().toISOString(), key: App.charKey(c) };
+          (post.comments = post.comments || []).push(cm);
+          appendCommentEl(post.id, cm);
+          await sleep(900 + Math.random() * 1100);
         }
       } catch (e) { /* 单条失败忽略 */ }
     }
@@ -317,6 +322,32 @@ const Moments = (() => {
       render();
     }
   }
+
+  /** 局部追加一条评论到对应朋友圈卡片（AI 自动评论逐条弹出用），并绑定删除 */
+  function appendCommentEl(postId, cm) {
+    const card = Array.from(document.querySelectorAll('.moment-card')).find(c => c.dataset.mid === String(postId));
+    if (!card) return;
+    const cbox = card.querySelector('.moment-comments');
+    if (!cbox) return;
+    const el = document.createElement('div');
+    el.className = 'comment-item';
+    el.innerHTML = `<span class="cname">${UI.esc(cm.character)}</span>：${UI.esc(window.stripActions ? window.stripActions(cm.text) : cm.text)}<span class="comment-del" data-time="${UI.esc(cm.time)}" data-key="${UI.esc(cm.key || '')}">✕</span>`;
+    cbox.appendChild(el);
+    const del = el.querySelector('.comment-del');
+    del.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const ok = await UI.confirm('删除这条评论？', { okText: '删除' });
+      if (!ok) return;
+      try {
+        await API.deleteComment(postId, del.dataset.time, del.dataset.key);
+        UI.toast('已删除');
+        await load(); render();
+      } catch (e) { UI.toast('删除失败：' + e.message); }
+    });
+    el.scrollIntoView({ block: 'nearest' });
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
   /* ---- 评论弹层 ---- */
   let commentTarget = null;

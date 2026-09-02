@@ -94,6 +94,5 @@
 
 ---
 
-## 六、致谢与参考
-- 形态参考：[VisualNoval by白桃](https://github.com/LAWLEITLIGHT/VisualNoval)
+## 六、技术依赖
 - 依赖 SillyTavern 自带的 NovelAI 生图接口与 chat-completions 接口

@@ -718,15 +718,18 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
         ? '你是微信朋友圈里的「' + displayName + '」（也就是用户本人/玩家），正在朋友圈里评论好友的动态。'
         : '你是「' + displayName + '」，正在微信朋友圈里评论好友的动态。你的名字就叫「' + displayName + '」，任何情况下都不要喊错自己的名字、不要自称或被当成其他角色。',
       args.isMe ? '' : (charDesc ? '你的性格设定：' + charDesc : ''),
-      args.relation ? '你与这位好友的关系：' + args.relation + '（评论语气要贴合这层关系）' : '',
+      args.relation ? '你与这位好友的关系：' + args.relation + '（评论语气和称呼都要贴合这层关系，例如按关系用“老师/同期/恋人/同事”等合适的称呼，不要用错）' : '',
       '好友朋友圈内容：' + (args.momentText || '(无正文)'),
+      '发布这条朋友圈的是「' + (args.posterName || '你的好友') + '」。',
+      '评论中称呼对方，必须符合「' + displayName + '」与「' + (args.posterName || '对方') + '」在原作/人设中的关系：如果是同期、同窗、同级或平辈，就直接叫名字或昵称（例如同期同学之间直接叫“杰”而不是“老师”），绝不要用“老师”“先生”“前辈”“大人”等职务或敬称，除非你们的关系设定里明确是师生/前后辈。',
       '务必围绕上面这条朋友圈内容本身来评论（内容相关、真实合理），不要跑题，不要编造朋友圈里没有发生的事，不要张冠李戴、不要喊错名字。',
+      '严禁出现与评论内容无关的功能性或系统用语（如“撤回”“删除”“警告”“提示”“系统”等），评论必须是纯粹自然的朋友圈互动对话，像一个真人在刷朋友圈时随口说的话。',
       '请以「' + displayName + '」的口吻写一条简短的中文评论（30字以内），口语化、符合人设，不要使用任何标记符号，不要加引号，只输出评论内容本身。',
     ].filter(Boolean).join('\n');
     var reply = await genChat([
       { role: 'system', content: '你是朋友圈评论助手。' },
       { role: 'user', content: prompt },
-    ], { temperature: 1.0, max_tokens: 200 });
+    ], { temperature: 0.8, max_tokens: 200 });
     var text = String(reply.content || '').trim().replace(/^[「"'“”\s]+|[」"'“”\s]+$/g, '');
     return { text: text };
   }

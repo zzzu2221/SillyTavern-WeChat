@@ -135,6 +135,23 @@ body {
   margin: 4px 0 12px;
 }
 .typing .bubble { color: #999; }
+.recall-tip { color: #b2b2b2; font-size: 12px; text-align: center; margin: 4px 0 12px; }
+
+/* 长按操作菜单（action sheet） */
+.msg-actions {
+  width: min(480px, 100%);
+  background: #fff;
+  border-radius: 14px 14px 0 0;
+  padding: 8px 0 calc(8px + env(safe-area-inset-bottom));
+  overflow: hidden;
+}
+.msg-action {
+  padding: 15px; text-align: center; font-size: 16px;
+  border-bottom: 0.5px solid #eee; cursor: pointer; user-select: none;
+}
+.msg-action:last-child { border-bottom: none; }
+.msg-action.danger { color: #fa5151; }
+.msg-action.cancel { color: #888; }
 
 /* 输入栏 */
 .chat-input-bar {
