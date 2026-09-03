@@ -4,11 +4,41 @@ const GroupChat = (() => {
   let busy = false;
   let backTo = 'page-chatlist';    // 进入群会话前的页面（返回用）
   let groupsBack = 'page-chatlist'; // 进入群列表前的页面
+  let pollTimer = null; // 群聊页停留时自动轮询新消息（AI 后台回复实时弹出）
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
   function currentPageId() {
     const p = Array.from(document.querySelectorAll('.page')).find(x => x.style.display !== 'none');
     return p ? p.id : 'page-chatlist';
+  }
+  function isGroupPageVisible() {
+    const p = document.getElementById('page-group-chat');
+    return p && p.style.display !== 'none' && !!current;
+  }
+  /** 群聊页停留时轮询：AI 后台回复/系统通知写入后自动刷新（不打断输入与浏览位置） */
+  async function pollOnce() {
+    if (!current || !current.name) return;
+    try {
+      const fresh = await API.getWeChatGroup(current.name);
+      if (!fresh) return;
+      const body = document.getElementById('group-chat-body');
+      const nearBottom = !body || (body.scrollHeight - body.scrollTop - body.clientHeight < 80);
+      const oldArr = current.messages || [], newArr = fresh.messages || [];
+      const oldLast = oldArr.length ? oldArr[oldArr.length - 1] : null;
+      const newLast = newArr.length ? newArr[newArr.length - 1] : null;
+      const changed = newArr.length !== oldArr.length || (oldLast && newLast && oldLast._rawIndex !== newLast._rawIndex);
+      if (!changed) return;
+      const prevScroll = body ? body.scrollTop : 0;
+      current = fresh;
+      renderChat(nearBottom);
+      if (body && !nearBottom) body.scrollTop = prevScroll;
+      if (typeof ChatList !== 'undefined' && ChatList.render) ChatList.render();
+    } catch (e) {}
+  }
+  function startPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(() => { if (isGroupPageVisible()) pollOnce(); }, 2500);
+    pollOnce(); // 打开时立即同步一次
   }
 
   const EMOJIS = ['😀','😄','😂','🤣','😊','😉','😍','😘','😜','🤪','😎','🥳','😏','😳','🥺','😢','😭','😤','😡','🤯','😱','🥰','😋','🤭','🫣','👍','👏','🙏','💪','🤝','👋','❤️','💔','💯','✨','🔥','🎉','🌈','🍀','🌙','🍰','☕','🐱','🐶','🐰','🐼','🦊','🐷','🦄','🙈','🙉','🙊','💬','❓','❗','✅','💤','🎮','📱','🎵','🎤','🏆','🌹'];
@@ -22,6 +52,14 @@ const GroupChat = (() => {
     let pk = '__me__';
     try { const p = (typeof Me !== 'undefined') ? Me.activePlayer() : null; if (p && p.id) pk = '__me__' + p.id; } catch (e) {}
     return pk;
+  }
+  /** 当前玩家账号的人设文本（身份/签名/挂载世界书），切换账号自动跟随；截断避免撑爆 prompt */
+  function meDescText() {
+    try {
+      const p = (typeof Me !== 'undefined') ? Me.activePlayer() : null;
+      if (!p) return '';
+      return [p.description, p.signature, p.worldbook].filter(Boolean).join('\n').slice(0, 600);
+    } catch (e) { return ''; }
   }
   function groupAvatarHtml(g) {
     // 群头像：首个成员头像，否则默认群图标
@@ -102,6 +140,7 @@ const GroupChat = (() => {
     document.getElementById('group-chat-title').textContent = title;
     App.showPage('page-group-chat', () => renderChat(true));
     checkMuteExpiry(); // 打开群时先检查一次禁言是否到期
+    startPolling();    // 停留时自动轮询新消息（AI 后台回复实时弹出）
   }
 
   /** 群公告置顶块（过长自动折叠，点击展开/收起） */
@@ -371,6 +410,7 @@ const GroupChat = (() => {
         const out = await API.genGroupReply({
           groupName: current.name, members, messages: msgs,
           meName: p.name || '我',
+          meDesc: meDescText(),
           timezone: cfg.timezone || 'Asia/Shanghai',
           announcement: (current.meta && current.meta.announcement) || '',
           event: evt,
@@ -642,6 +682,7 @@ const GroupChat = (() => {
           groupName, members,
           messages: g.messages.map(m => ({ name: charDisplayName(m.key, m.name), key: m.key, text: m.text })),
           meName: p.name || '我',
+          meDesc: meDescText(),
           timezone: cfg.timezone || 'Asia/Shanghai',
           announcement: (g.meta && g.meta.announcement) || '',
           event: evt || '有人往群里分享了一条朋友圈/公众号内容（上面最新那条分享），大家围绕分享的内容自然地聊几句。',
@@ -657,6 +698,7 @@ const GroupChat = (() => {
             groupName, members,
             messages: fresh.messages.map(m => ({ name: charDisplayName(m.key, m.name), key: m.key, text: m.text })),
             meName: p.name || '我',
+            meDesc: meDescText(),
             timezone: cfg.timezone || 'Asia/Shanghai',
             announcement: (g.meta && g.meta.announcement) || '',
             event: '最新一条消息 @ 了 ' + (atNames[0] === '@all' ? '所有人' : atNames.join('、')) + '。被 @ 的成员现在必须回应对方，其他人可以视情况补充或保持沉默。',
@@ -945,7 +987,9 @@ const GroupChat = (() => {
       try { await API.updateWeChatGroup(name, { owner }); } catch (e) {}
     }
     const now = Date.now();
-    const memberRows = current.members.map(mm => {
+    // 玩家单独渲染在「我」行，这里过滤掉 __me__ 成员，避免「白井」出现两次
+    const nonMeMembers = current.members.filter(mm => String(mm.key || '').indexOf('__me__') !== 0);
+    const memberRows = nonMeMembers.map(mm => {
       const isOwner = mm.key === owner;
       const isAdmin = admins.indexOf(mm.key) >= 0 && !isOwner;
       const mu = muted[mm.key];
@@ -977,7 +1021,7 @@ const GroupChat = (() => {
         <div class="gi-avatar" id="gi-avatar">${avatar}</div>
         <div class="gi-head-main">
           <div class="gi-name">${UI.esc(m.displayName || name)}</div>
-          <div class="gi-sub">${current.members.length + 1} 位成员</div>
+          <div class="gi-sub">${nonMeMembers.length + 1} 位成员</div>
         </div>
         <button class="gi-btn" id="gi-change-avatar">更换头像</button>
         <input type="file" id="gi-avatar-file" accept="image/*" style="display:none">

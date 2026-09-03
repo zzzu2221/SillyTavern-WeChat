@@ -681,7 +681,15 @@ const Moments = (() => {
     tip.textContent = 'AI 正在以「' + characterName + '」的身份构思评论…';
     tip.className = 'modal-tip loading';
     try {
-      const r = await API.aiComment({ momentId: commentTarget.id, character, characterName, momentText: commentTarget.text, isMe: who === 'me' });
+      let rel = null;
+      try { const p = (typeof Me !== 'undefined') ? Me.activePlayer() : null; if (p) rel = (p.relations || []).find(r => r.key === character) || null; } catch (e) {}
+      let meDesc = '';
+      try { const p = (typeof Me !== 'undefined') ? Me.activePlayer() : null; if (p) meDesc = [p.description, p.signature, p.worldbook].filter(Boolean).join('\n'); } catch (e) {}
+      const r = await API.aiComment({
+        momentId: commentTarget.id, character, characterName, momentText: commentTarget.text,
+        isMe: who === 'me', relation: who === 'me' ? '' : ((rel && rel.relation) || ''),
+        meDesc: meDesc,
+      });
       document.getElementById('comment-text').value = r.text ? commentText(r.text) : '';
       tip.textContent = '已生成，点「发送」确认';
       tip.className = 'modal-tip';
@@ -786,7 +794,9 @@ const Moments = (() => {
           }
         } catch (e) { /* 群读取失败则忽略 */ }
       }
-      const r = await API.genAutoMoment({ character, characterName: App.displayName(c), recentChat, hint, imgTag, groupChat, groupName });
+      let meDesc = '';
+      try { const p = (typeof Me !== 'undefined') ? Me.activePlayer() : null; if (p) meDesc = [p.description, p.signature, p.worldbook].filter(Boolean).join('\n'); } catch (e) {}
+      const r = await API.genAutoMoment({ character, characterName: App.displayName(c), recentChat, hint, imgTag, groupChat, groupName, meDesc });
       document.getElementById('aim-text').value = r.text ? (window.stripActions ? window.stripActions(r.text) : r.text) : '';
       document.getElementById('aim-img').value = r.imgPrompt || '';
       setAiTip('草稿已生成，可修改后发布', '');

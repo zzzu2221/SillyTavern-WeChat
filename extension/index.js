@@ -18,7 +18,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
   var IMG_PROMPT_RULES = [
     '1. 只写画面描述英文关键词（纯英文短标签，单行不换行），绝对不要添加画质、画风类词汇（如 masterpiece, best quality, anime style, illustration, highly detailed 等），这些由插件全局预设自动加载。',
     '2. 关键词排序顺序固定：角色英文名称 → 年龄性别 → 发型样貌 → 穿戴细节 → 神态表情 → 身体动作 → 手部细节 → 所处环境 → 光影氛围 → 次要物品 → 画面约束。',
-    '3. 角色必须有固定人设锚点：先写该角色在其出处原作/设定中的英文名或罗马音（从角色卡描述中提取，例如五条悟=gojou satoru，其他世界观角色同理），再写标志性外貌（同样从角色卡描述中提取：发型、瞳色、特征服饰、面饰等），服饰神态动作严格贴合当前剧情。',
+    '3. 角色锚点（仅当画面中有角色出镜时才写）：先写该角色在其出处原作/设定中的英文名或罗马音（从角色卡描述中提取，例如五条悟=gojou satoru，其他世界观角色同理），再写标志性外貌（同样从角色卡描述中提取：发型、瞳色、特征服饰、面饰等），服饰神态动作严格贴合当前剧情。**如果发的是纯风景、实物、美食、建筑、场景、物品等不涉及角色的内容，绝对不要写任何角色或人物描述，只写画面本身**。',
     '4. 仅还原本轮剧情关键画面，不脑补、不带过往剧情。',
     '5. 多人群像只细化 1~2 个主要角色，配角极简站位。',
     '6. 全程规避畸形肢体、错误构图。',
@@ -348,6 +348,15 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     return out;
   }
 
+  /** 当前生效预设的专属负面提示词（预设 neg 优先，否则全局负面）。切换预设时负面跟着走 */
+  function effectiveNegative(presetArg) {
+    var im = imageConfig();
+    var name = presetArg || im.defaultPreset || '';
+    var pre = name ? findPreset(name) : null;
+    if (pre && pre.neg) return pre.neg;
+    return im.negative_prompt || '';
+  }
+
   async function ensureNovelKey() {
     try {
       var zh = chatu8Settings();
@@ -427,7 +436,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     var key = im.apiKey || '';
     if (!key) throw new Error('未填写 NovelAI API Key（设置 → 生图）');
     var seed = (args.seed != null && args.seed >= 0) ? args.seed : Math.floor(Math.random() * 2147483647);
-    var negative = args.negative_prompt || im.negative_prompt || '';
+    var negative = args.negative_prompt || effectiveNegative(args.preset) || '';
     var model = args.model || im.model;
     // NAI 4.5 系列：不支持 SM/SMEA，payload 中不携带 sm/sm_dyn（与智绘机 4.5 请求一致），否则服务端 500
     var is45 = String(model).indexOf('4-5') >= 0 || String(model).indexOf('4.5') >= 0;
@@ -496,7 +505,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     await ensureNovelKey();
     var body = {
       prompt: composePrompt(args.prompt, args.preset),
-      negative_prompt: args.negative_prompt || im.negative_prompt,
+      negative_prompt: args.negative_prompt || effectiveNegative(args.preset) || '',
       model: model,
       width: args.width || im.width,
       height: args.height || im.height,
@@ -740,9 +749,10 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     var c = chars.find(function (x) { return x.key === args.character || x.name === args.character; });
     if (c && c.description) charDesc = c.description;
     if (c && c.personality) charDesc += (charDesc ? '\n' : '') + c.personality;
+    var meDesc = args.meDesc || '';   // 玩家评论时的玩家本人人设
     var prompt = [
       args.isMe
-        ? '你是微信朋友圈里的「' + displayName + '」（也就是用户本人/玩家），正在朋友圈里评论好友的动态。'
+        ? '你是微信朋友圈里的「' + displayName + '」（也就是用户本人/玩家），正在朋友圈里评论好友的动态。' + (meDesc ? '\n你的身份设定：' + String(meDesc).slice(0, 400) : '')
         : '你是「' + displayName + '」，正在微信朋友圈里评论好友的动态。你的名字就叫「' + displayName + '」，任何情况下都不要喊错自己的名字、不要自称或被当成其他角色。',
       args.isMe ? '' : (charDesc ? '你的性格设定：' + charDesc : ''),
       args.relation ? '你与这位好友的关系：' + args.relation + '（评论语气和称呼都要贴合这层关系，例如按关系用“老师/同期/恋人/同事”等合适的称呼，不要用错）' : '',
@@ -1936,6 +1946,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     var members = args.members || [];
     var messages = args.messages || [];
     var meName = args.meName || '我';
+    var meDesc = args.meDesc || '';   // 玩家当前账号的人设/身份/世界书（切换账号自动跟随）
     var timezone = args.timezone || 'Asia/Shanghai';
     var announcement = args.announcement || '';
     var event = args.event || '';
@@ -1963,6 +1974,11 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     });
     // 成员设定压缩为一句，避免长文本被模型抄写
     var memberLines = members.map(function (m) {
+      // 玩家本人：明确身份与称呼方式，避免 AI 一直喊「群主」而不是用名字
+      if (String(m.key || '').indexOf('__me__') === 0) {
+        return m.name + '（玩家本人，你在微信里对话的对象，也是本群群主。称呼 TA 时用微信名「' + m.name + '」，绝不要用「群主」「管理员」等头衔代替称呼' +
+          (meDesc ? '。TA 的身份设定：' + String(meDesc).slice(0, 400) : '') + '）';
+      }
       var c = (chars || []).find(function (x) { return charKeyOf(x) === m.key; });
       var desc = '';
       if (c) {
@@ -1998,6 +2014,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       '4. 每条以「角色=成员名;内容=说的话」开头（注意：开头的「角色=」是固定的三个字，等号后面才写成员名，比如「角色=硝子;内容=...」；不要把成员名写在等号前面），多条用「|||」分隔。\n' +
       '5. 只输出说的话本身（就是微信消息），一句或两句，简短自然，口语化，贴合角色性格。\n' +
       '6. 成员在说话时可以用「@成员名」@ 别人（像微信一样@对方），对方下一轮会接话；但不要每条都@。@ 玩家时必须用他的微信名「@' + meName + '」，绝不要写成「@玩家」。\n' +
+      '6.5 提到玩家（可能是群主/管理员）时，一律用他的微信名「' + meName + '」称呼，不要用「群主」「管理员」这类头衔代替称呼（例如说「' + meName + '同意就行」，不要说「群主同意就行」）。\n' +
       '7. 绝对禁止输出：任何解释、规则、设定原文、自我介绍、括号、星号、引号、旁白、示例、开头结尾客套话；说话内容里不要带「XX：」这类名字前缀。\n' +
       '【格式示例】\n' +
       '用户消息：我回来了\n' +
