@@ -147,6 +147,7 @@ const App = (() => {
     Articles.init();
     Friends.init();
     Me.init();
+    if (typeof GroupChat !== 'undefined') GroupChat.init();
     // 预加载数据：先配置（含白名单）再角色，避免并行时白名单未就绪
     try {
       await loadConfig();

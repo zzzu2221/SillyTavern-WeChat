@@ -42,12 +42,15 @@ const Articles = (() => {
     }
     body.innerHTML = articles.map((a, idx) => {
       const info = posterInfo(a);
-      const avatar = `<span class="article-avatar-icon">📰</span>`;
+      // 封面图：有封面显示图片缩略图，无封面显示默认 📰 图标
+      const coverHtml = a.cover
+        ? `<div class="article-avatar" style="overflow:hidden"><img src="${UI.esc(a.cover)}" style="width:100%;height:100%;object-fit:cover;border-radius:6px" onerror="this.outerHTML='<span class=article-avatar-icon>📰</span>'"></div>`
+        : `<span class="article-avatar-icon">📰</span>`;
       const summary = String(a.body || '').replace(/\s+/g, ' ').slice(0, 56);
       const delBtn = imgEnabled() ? `<span class="article-del" data-idx="${idx}" title="删除">✕</span>` : '';
       return `
       <div class="article-card" data-idx="${idx}">
-        <div class="article-avatar">${avatar}</div>
+        <div class="article-avatar">${coverHtml}</div>
         <div class="article-main">
           <div class="article-title">${UI.esc(a.title)}</div>
           <div class="article-summary">${UI.esc(summary)}${a.body && a.body.length > 56 ? '…' : ''}</div>
@@ -77,16 +80,57 @@ const Articles = (() => {
   }
 
   /* ---- 生成弹层 ---- */
+  let artCover = ''; // 当前草稿封面（base64 data URL）
   function openArticleModal() {
+    artCover = '';
     document.getElementById('art-hint').value = '';
     document.getElementById('art-author').value = '';
     document.getElementById('art-title').value = '';
     document.getElementById('art-body').value = '';
     document.getElementById('art-tip').textContent = '';
+    const pv = document.getElementById('art-cover-preview');
+    if (pv) pv.style.display = 'none';
+    const cl = document.getElementById('art-cover-clear');
+    if (cl) cl.style.display = 'none';
+    const st = document.getElementById('art-cover-state');
+    if (st) st.textContent = '';
     document.getElementById('article-modal').style.display = 'flex';
   }
   function closeArticleModal() {
     document.getElementById('article-modal').style.display = 'none';
+  }
+  /** AI 生成封面：先让 AI 按主题写英文封面提示词，再走生图（智绘姬/自填 NovelAI） */
+  async function genCover() {
+    const tip = document.getElementById('art-tip');
+    const title = document.getElementById('art-title').value.trim();
+    const body = document.getElementById('art-body').value.trim();
+    const hint = document.getElementById('art-hint').value.trim();
+    if (!title && !body && !hint) { tip.textContent = '先填主题/标题，再生成封面'; return; }
+    const cfg = App.state.config || {};
+    if (cfg.imageEnabled === false) { tip.textContent = '生图已关闭，可在设置里开启'; return; }
+    tip.textContent = 'AI 正在构思封面提示词…';
+    tip.className = 'modal-tip loading';
+    try {
+      const r = await API.genChat([{
+        role: 'system', content: '你是公众号封面配图提示词设计师。根据给定的主题/标题，输出一条英文生图提示词（40词以内，描述一张杂志封面风格的图片；只要提示词本身，不要引号、不要解释）。',
+      }, { role: 'user', content: '主题：' + (hint || title) }], { temperature: 0.8, max_tokens: 80 });
+      const prompt = String((r && r.content) || '').trim().replace(/["“”']/g, '');
+      if (!prompt) { tip.textContent = '生成提示词失败'; tip.className = 'modal-tip'; return; }
+      tip.textContent = '正在生图（约 20~60 秒）…';
+      // 默认走直连（与朋友圈 AI 发圈同款）；直连失败会自动回退酒馆代理（已兼容 NAI 4.5）
+      const img = await API.genImage(prompt, { force: true });
+      const url = (img && (img.url || img.image)) || '';
+      if (!url) throw new Error('生图无返回');
+      artCover = url;
+      const pv = document.getElementById('art-cover-preview'), im = document.getElementById('art-cover-img');
+      if (pv && im) { im.src = url; pv.style.display = 'block'; }
+      const cl = document.getElementById('art-cover-clear');
+      if (cl) cl.style.display = '';
+      const st = document.getElementById('art-cover-state');
+      if (st) st.textContent = '封面已生成';
+      tip.textContent = '封面已生成';
+      tip.className = 'modal-tip';
+    } catch (e) { tip.textContent = '封面生成失败：' + e.message; tip.className = 'modal-tip'; }
   }
   async function genDraft() {
     const tip = document.getElementById('art-tip');
@@ -119,7 +163,7 @@ const Articles = (() => {
     tip.textContent = '发布中…';
     tip.className = 'modal-tip loading';
     try {
-      await API.publishArticle({ author, title, body });
+      await API.publishArticle({ author, title, body, cover: artCover });
       tip.textContent = '发布成功';
       tip.className = 'modal-tip';
       closeArticleModal();
@@ -147,6 +191,7 @@ const Articles = (() => {
             <div class="article-read-time">${UI.fmtTime(a.time)}</div>
           </div>
         </div>
+        ${a.cover ? `<img class="article-read-cover" src="${UI.esc(a.cover)}" onerror="this.style.display='none'">` : ''}
         <h1 class="article-read-title">${UI.esc(a.title)}</h1>
         <div class="article-read-content">${bodyHtml}</div>
       </div>`;
@@ -169,7 +214,7 @@ const Articles = (() => {
       id: current.id,
       title: current.title || '',
       source: (current.author || '公众号') + ' · 公众号',
-      thumb: '',
+      thumb: (current && current.cover) || '',
     };
     Moments.shareToChat(text, card);
   }
@@ -187,6 +232,17 @@ const Articles = (() => {
     document.getElementById('art-cancel').addEventListener('click', closeArticleModal);
     document.getElementById('art-gen').addEventListener('click', genDraft);
     document.getElementById('art-publish').addEventListener('click', publish);
+    const cg = document.getElementById('art-cover-gen');
+    if (cg) cg.addEventListener('click', genCover);
+    const cc = document.getElementById('art-cover-clear');
+    if (cc) cc.addEventListener('click', () => {
+      artCover = '';
+      const pv = document.getElementById('art-cover-preview');
+      if (pv) pv.style.display = 'none';
+      cc.style.display = 'none';
+      const st = document.getElementById('art-cover-state');
+      if (st) st.textContent = '';
+    });
     document.getElementById('article-modal').addEventListener('click', e => {
       if (e.target.id === 'article-modal') closeArticleModal();
     });

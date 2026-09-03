@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -16,6 +16,7 @@
       <header class="page-header">
         <div class="header-title">微信</div>
         <div class="header-actions">
+          <button class="icon-btn" id="btn-chatlist-groups" title="群聊">👥</button>
           <button class="icon-btn" id="btn-chatlist-add" title="发起会话">＋</button>
         </div>
       </header>
@@ -102,6 +103,48 @@
       <div class="page-body" id="detail-body"></div>
     </div>
 
+    <!-- 群聊列表页（微信页 👥 入口） -->
+    <div class="page page-full" id="page-groups" style="display:none">
+      <header class="page-header">
+        <button class="icon-btn" id="btn-groups-back">‹</button>
+        <div class="header-title">群聊</div>
+        <div class="header-actions">
+          <button class="icon-btn" id="btn-groups-add" title="新建群聊">＋</button>
+        </div>
+      </header>
+      <div class="page-body" id="groups-body"></div>
+    </div>
+
+    <!-- 群聊会话页 -->
+    <div class="page page-full" id="page-group-chat" style="display:none">
+      <header class="page-header group-chat-header">
+        <button class="icon-btn" id="btn-group-chat-back">‹</button>
+        <div class="header-title" id="group-chat-title">群聊</div>
+        <div class="header-actions">
+          <button class="icon-btn" id="btn-group-chat-info" title="群信息">⋯</button>
+        </div>
+      </header>
+      <div class="page-body group-chat-body" id="group-chat-body"></div>
+      <div class="chat-input-bar">
+        <button class="emoji-btn" id="btn-group-emoji" title="表情">😊</button>
+        <button class="emoji-btn at-btn" id="btn-group-at" title="@成员">@</button>
+        <button class="emoji-btn" id="btn-group-fire" title="群活跃（AI 自发聊天）">🔥</button>
+        <div class="emoji-panel" id="group-emoji-panel"></div>
+        <textarea id="group-input" rows="1" placeholder="发消息…" enterkeyhint="send"></textarea>
+        <button id="group-send" class="send-btn">发送</button>
+      </div>
+    </div>
+
+    <!-- 群信息 / 管理页 -->
+    <div class="page page-full" id="page-group-info" style="display:none">
+      <header class="page-header">
+        <button class="icon-btn" id="btn-group-info-back">‹</button>
+        <div class="header-title">群信息</div>
+        <div class="header-actions"></div>
+      </header>
+      <div class="page-body" id="group-info-body"></div>
+    </div>
+
     <!-- 会话列表页（某角色全部历史会话） -->
     <div class="page page-full" id="page-sessions" style="display:none">
       <header class="page-header">
@@ -152,7 +195,7 @@
 
   <!-- 底部 Tab -->
   <nav class="tabbar" id="tabbar">
-    <div class="tab-item" data-tab="chatlist"><span class="tab-icon">💬</span><span class="tab-label">微信</span></div>
+    <div class="tab-item" id="tab-chatlist" data-tab="chatlist"><span class="tab-icon">💬</span><span class="tab-label">微信</span></div>
     <div class="tab-item" data-tab="contacts"><span class="tab-icon">👥</span><span class="tab-label">通讯录</span></div>
     <div class="tab-item" data-tab="moments"><span class="tab-icon">🌐</span><span class="tab-label">朋友圈</span></div>
     <div class="tab-item" id="tab-articles" data-tab="articles"><span class="tab-icon">📰</span><span class="tab-label">公众号</span></div>
@@ -243,6 +286,10 @@
       <div class="modal-field">
         <label>补充灵感（可选，留空则 AI 依据最近聊天）</label>
         <textarea id="aim-hint" rows="2" placeholder="例如：今天发生了什么？想炫耀/吐槽什么？"></textarea>
+      </div>
+      <div class="modal-field">
+        <label>参考群聊（可选，让角色根据群聊话题发朋友圈）</label>
+        <select id="aim-group"><option value="">不参考群聊</option></select>
       </div>
       <div class="modal-field">
         <label>AI 生成的文案（可修改）</label>
@@ -359,11 +406,20 @@
 
   <!-- 分享到私信弹层 -->
   <div class="modal-mask" id="share-modal" style="display:none">
-    <div class="modal-card">
-      <div class="modal-title">分享到私信</div>
+    <div class="modal-card share-modal-card">
+      <div class="modal-title">分享到</div>
       <div class="modal-field">
-        <label>分享给谁</label>
-        <select id="share-char"></select>
+        <label>私信（可多选）</label>
+        <div class="share-toolbar">
+          <button type="button" class="mini-btn" id="share-all">全选</button>
+          <button type="button" class="mini-btn" id="share-none">清空</button>
+          <span class="share-count" id="share-count"></span>
+        </div>
+        <div class="share-char-list" id="share-char-list"></div>
+      </div>
+      <div class="modal-field">
+        <label>群聊（可多选）</label>
+        <div class="share-group-list" id="share-group-list"></div>
       </div>
       <div class="modal-field">
         <label>附带的话（可选）</label>
@@ -377,8 +433,54 @@
     </div>
   </div>
 
+  <!-- 新建群聊弹层 -->
+  <div class="modal-mask" id="group-create-modal" style="display:none">
+    <div class="modal-card share-modal-card">
+      <div class="modal-title">新建群聊</div>
+      <div class="modal-field">
+        <label>群名</label>
+        <input id="group-create-name" placeholder="例如：高专同窗群" maxlength="20">
+      </div>
+      <div class="modal-field">
+        <label>选择群成员（可多选）</label>
+        <div class="share-toolbar">
+          <button type="button" class="mini-btn" id="group-create-all">全选</button>
+          <button type="button" class="mini-btn" id="group-create-none">清空</button>
+          <span class="share-count" id="group-create-count"></span>
+        </div>
+        <div class="share-char-list" id="group-create-list"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-plain" id="group-create-cancel">取消</button>
+        <button class="btn-primary" id="group-create-ok">创建</button>
+      </div>
+      <div class="modal-tip" id="group-create-tip"></div>
+    </div>
+  </div>
+
   <!-- Toast -->
   <div class="toast" id="toast"></div>
+
+  <!-- 添加群成员弹层（无需管理员权限，随时拉人进群） -->
+  <div class="modal-mask" id="group-add-modal" style="display:none">
+    <div class="modal-card share-modal-card">
+      <div class="modal-title">添加群成员</div>
+      <div class="modal-field">
+        <label>从通讯录选择（可多选）</label>
+        <div class="share-toolbar">
+          <button type="button" class="mini-btn" id="group-add-all">全选</button>
+          <button type="button" class="mini-btn" id="group-add-none">清空</button>
+          <span class="share-count" id="group-add-count"></span>
+        </div>
+        <div class="share-char-list" id="group-add-list"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-plain" id="group-add-cancel">取消</button>
+        <button class="btn-primary" id="group-add-ok">添加</button>
+      </div>
+      <div class="modal-tip" id="group-add-tip"></div>
+    </div>
+  </div>
 
   <!-- 选择关联角色弹层 -->
   <div class="modal-mask" id="role-pick-modal" style="display:none">
@@ -459,6 +561,15 @@
         <label>正文（可修改）</label>
         <textarea id="art-body" rows="6" placeholder="点击「✨ 生成」后自动填写"></textarea>
       </div>
+      <div class="modal-field">
+        <label>封面图（可选）</label>
+        <div class="art-cover-row">
+          <button class="mini-btn" id="art-cover-gen" type="button">🎨 AI 生成封面</button>
+          <button class="mini-btn" id="art-cover-clear" type="button" style="display:none">移除封面</button>
+          <span class="share-count" id="art-cover-state"></span>
+        </div>
+        <div id="art-cover-preview" style="display:none;margin-top:6px"><img style="max-height:140px;border-radius:8px;display:block" id="art-cover-img"></div>
+      </div>
       <div class="modal-actions">
         <button class="btn-plain" id="art-cancel">取消</button>
         <button class="btn-plain" id="art-gen">✨ 生成</button>
@@ -469,17 +580,18 @@
   </div>
 </div>
 
-<script src="js/api.js?v=2026090320"></script>
-<script src="js/store.js?v=2026090320"></script>
-<script src="js/ui.js?v=2026090320"></script>
-<script src="js/app.js?v=2026090320"></script>
-<script src="js/contacts.js?v=2026090320"></script>
-<script src="js/chatlist.js?v=2026090320"></script>
-<script src="js/chat.js?v=2026090320"></script>
-<script src="js/detail.js?v=2026090320"></script>
-<script src="js/moments.js?v=2026090320"></script>
-<script src="js/articles.js?v=2026090320"></script>
-<script src="js/friends.js?v=2026090320"></script>
-<script src="js/me.js?v=2026090320"></script>
+<script src="js/api.js?v=2026090324"></script>
+<script src="js/store.js?v=2026090364"></script>
+<script src="js/ui.js?v=2026090364"></script>
+<script src="js/app.js?v=2026090364"></script>
+<script src="js/contacts.js?v=2026090364"></script>
+<script src="js/chatlist.js?v=2026090364"></script>
+<script src="js/chat.js?v=2026090364"></script>
+<script src="js/detail.js?v=2026090364"></script>
+<script src="js/moments.js?v=2026090364"></script>
+<script src="js/articles.js?v=2026090364"></script>
+<script src="js/friends.js?v=2026090364"></script>
+<script src="js/me.js?v=2026090364"></script>
+<script src="js/groupchat.js?v=2026090364"></script>
 </body>
 </html>

@@ -482,50 +482,108 @@ const Moments = (() => {
     };
     shareToChat(text, card);
   }
-  /** 通用分享：把一段文本分享给某角色私信（朋友圈/公众号文章都走这里；card 用于渲染成可点击的转发卡片） */
+  /** 通用分享：把一段文本分享给角色私信 / 群聊（朋友圈/公众号文章都走这里；card 用于渲染成可点击的转发卡片） */
   function shareToChat(text, card) {
     sharePayloadText = text || '';
     sharePayloadCard = card || null;
     const mask = document.getElementById('share-modal');
     if (!mask) return;
-    const sel = document.getElementById('share-char');
-    sel.innerHTML = '<option value="">请选择…</option>' + sortedChars().map(c =>
-      `<option value="${UI.esc(App.charKey(c))}">${UI.esc(App.displayName(c))}</option>`
-    ).join('');
+    const list = document.getElementById('share-char-list');
+    list.innerHTML = sortedChars().map(c => {
+      const avatar = UI.avatarSrc(c.avatar) ? `<img src="${UI.esc(UI.avatarSrc(c.avatar))}">` : '';
+      return `<label class="share-char-item" data-key="${UI.esc(App.charKey(c))}">
+        <span class="avatar sm">${avatar}</span>
+        <span class="share-char-name">${UI.esc(App.displayName(c))}</span>
+        <input type="checkbox" value="${UI.esc(App.charKey(c))}">
+      </label>`;
+    }).join('');
+    list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.addEventListener('change', updateShareCount));
+    // 群聊列表（异步填充）
+    const glist = document.getElementById('share-group-list');
+    glist.innerHTML = '<div class="share-char-item" style="color:#999">加载中…</div>';
+    if (typeof API.listWeChatGroups === 'function') {
+      API.listWeChatGroups().then(groups => {
+        if (!groups || !groups.length) { glist.innerHTML = '<div class="share-char-item" style="color:#bbb">暂无群聊</div>'; return; }
+        glist.innerHTML = groups.map(g => {
+          const avatar = g.avatar ? `<img src="${UI.esc(g.avatar)}">` : '';
+          return `<label class="share-char-item" data-group="${UI.esc(g.name)}">
+            <span class="avatar sm">${avatar}</span>
+            <span class="share-char-name">${UI.esc(g.displayName || g.name)}</span>
+            <input type="checkbox" value="${UI.esc(g.name)}">
+          </label>`;
+        }).join('');
+        glist.querySelectorAll('input[type=checkbox]').forEach(cb => cb.addEventListener('change', updateShareCount));
+        updateShareCount();
+      }).catch(() => { glist.innerHTML = '<div class="share-char-item" style="color:#bbb">暂无群聊</div>'; });
+    } else {
+      glist.innerHTML = '<div class="share-char-item" style="color:#bbb">暂无群聊</div>';
+    }
+    updateShareCount();
     document.getElementById('share-note').value = '';
     document.getElementById('share-tip').textContent = '';
     mask.style.display = 'flex';
+  }
+  function updateShareCount() {
+    const n = document.querySelectorAll('#share-char-list input[type=checkbox]:checked').length +
+              document.querySelectorAll('#share-group-list input[type=checkbox]:checked').length;
+    const el = document.getElementById('share-count');
+    if (el) el.textContent = n ? '已选 ' + n + ' 个' : '';
   }
   function closeShareModal() {
     const m = document.getElementById('share-modal');
     if (m) m.style.display = 'none';
   }
-  /** 分享给某角色：打开 TA 的私信，把内容以转发卡片发过去（AI 能读到发布者与内容，并回应展开讨论） */
+  /** 分享到私信 + 群聊（可多选）：后台发送不跳转，AI 在后台逐条回复；群聊发文本消息 */
   async function doShare() {
     if (!sharePayloadText) return;
-    const sel = document.getElementById('share-char');
-    const key = sel.value;
-    if (!key) { document.getElementById('share-tip').textContent = '请选择要分享的角色'; return; }
-    const c = App.charByKey(key);
-    if (!c) { document.getElementById('share-tip').textContent = '角色不存在'; return; }
+    const charKeys = [...document.querySelectorAll('#share-char-list input[type=checkbox]:checked')].map(cb => cb.value);
+    const groupNames = [...document.querySelectorAll('#share-group-list input[type=checkbox]:checked')].map(cb => cb.value);
+    if (!charKeys.length && !groupNames.length) { document.getElementById('share-tip').textContent = '请至少勾选一个私信或群聊'; return; }
+    const tip = document.getElementById('share-tip');
+    tip.textContent = '正在分享给 ' + (charKeys.length + groupNames.length) + ' 个对象…';
+    tip.className = 'modal-tip loading';
+    closeShareModal();
     const note = document.getElementById('share-note').value.trim();
+    // 附带的话随卡片一起存（渲染时显示在卡片上方，微信转发样式）
+    const shareCard = sharePayloadCard ? Object.assign({}, sharePayloadCard, { note: note || '' }) : null;
     // 分享者身份：让 AI 明确是「当前玩家」转发的，避免把分享者误认成朋友圈发布者
     let meName = '我';
     try { const p = (typeof Me !== 'undefined') ? Me.activePlayer() : null; if (p && p.name) meName = p.name; } catch (e) {}
     const shareText = (note ? note + '\n' : '') + '我（' + meName + '）分享给你看：\n' + sharePayloadText;
-    const tip = document.getElementById('share-tip');
-    tip.textContent = '正在打开 ' + App.displayName(c) + ' 的聊天…';
-    tip.className = 'modal-tip loading';
-    closeShareModal();
-    try {
-      await App.openCharacter(c);
-      await sleep(400); // 等聊天页加载完成
-      await Chat.send(shareText, sharePayloadCard ? { card: sharePayloadCard } : undefined);
-      UI.toast('已分享给 ' + App.displayName(c));
-      // 停留聊天页（自动跳转过去），让用户看 AI 回应
-    } catch (e) {
-      UI.toast('分享失败：' + (e && e.message || e));
+    let ok = 0, fail = 0;
+    // 私信：后台发送（不切换页面），AI 后台必回
+    for (const key of charKeys) {
+      const c = App.charByKey(key);
+      if (!c) { fail++; continue; }
+      try {
+        let s = Store.sessionsOf(App.charKey(c), c.name)[0];
+        if (!s && typeof Chat.createSession === 'function') s = await Chat.createSession(c);
+        if (!s) { fail++; continue; }
+        if (typeof Chat.sendToCharBackground === 'function') {
+          await Chat.sendToCharBackground(c, s, shareText, shareCard ? { card: shareCard } : undefined);
+        } else {
+          // 兜底：旧式前台发送
+          await App.openCharacter(c);
+          await sleep(400);
+          await Chat.send(shareText, shareCard ? { card: shareCard } : undefined);
+        }
+        ok++;
+      } catch (e) { fail++; }
     }
+    // 群聊：写一条文本消息（触发群里 AI 随机接话）
+    let pk = '__me__';
+    try { const p = (typeof Me !== 'undefined') ? Me.activePlayer() : null; if (p && p.id) pk = '__me__' + p.id; } catch (e) {}
+    for (const gname of groupNames) {
+      try {
+        await API.saveWeChatMessage(gname, { name: meName, key: pk, text: shareText, card: shareCard || undefined });
+        ok++;
+        // 后台让群里 AI 自然接话（不阻塞、不跳转）
+        if (typeof GroupChat !== 'undefined' && GroupChat.replyGroupBackground) {
+          GroupChat.replyGroupBackground(gname);
+        }
+      } catch (e) { fail++; }
+    }
+    UI.toast('已分享给 ' + ok + ' 个对象' + (fail ? '，' + fail + ' 个失败' : ''));
   }
 
   /* ---- 评论弹层 ---- */
@@ -653,6 +711,17 @@ const Moments = (() => {
     document.getElementById('aim-text').value = '';
     document.getElementById('aim-img').value = '';
     setAiTip('', '');
+    // 参考群聊下拉（异步填充）
+    const gsel = document.getElementById('aim-group');
+    if (gsel) {
+      gsel.innerHTML = '<option value="">不参考群聊</option>';
+      if (typeof API.listWeChatGroups === 'function') {
+        API.listWeChatGroups().then(groups => {
+          gsel.innerHTML = '<option value="">不参考群聊</option>' + (groups || []).map(g =>
+            `<option value="${UI.esc(g.name)}">${UI.esc(g.displayName || g.name)}</option>`).join('');
+        }).catch(() => {});
+      }
+    }
     // AI 发圈配图方式完全独立：不受生图总开关影响，始终可选「无图 / AI 生图」
     setAiImgMode('gen');
     const genBtn = document.querySelector('#aim-imgmode .seg-btn[data-mode="gen"]');
@@ -703,7 +772,21 @@ const Moments = (() => {
       const hint = document.getElementById('aim-hint').value.trim();
       const recentChat = await recentChatOf(character);
       const imgTag = imgTagOf(character);
-      const r = await API.genAutoMoment({ character, characterName: App.displayName(c), recentChat, hint, imgTag });
+      // 参考群聊：读取最近消息，让角色根据群聊话题写朋友圈
+      let groupChat = null, groupName = '';
+      const gname = document.getElementById('aim-group').value;
+      if (gname) {
+        try {
+          const g = await API.getWeChatGroup(gname);
+          if (g && g.messages && g.messages.length) {
+            groupName = g.displayName || g.name || gname;
+            groupChat = g.messages.slice(-15).map(m => ({
+              name: m.name || '', is_user: String(m.key || '').indexOf('__me__') === 0, text: m.text,
+            }));
+          }
+        } catch (e) { /* 群读取失败则忽略 */ }
+      }
+      const r = await API.genAutoMoment({ character, characterName: App.displayName(c), recentChat, hint, imgTag, groupChat, groupName });
       document.getElementById('aim-text').value = r.text ? (window.stripActions ? window.stripActions(r.text) : r.text) : '';
       document.getElementById('aim-img').value = r.imgPrompt || '';
       setAiTip('草稿已生成，可修改后发布', '');
@@ -798,6 +881,14 @@ const Moments = (() => {
     document.querySelectorAll('#comment-who .seg-btn').forEach(b => b.addEventListener('click', () => setCommentWho(b.dataset.who)));
     document.getElementById('share-cancel').addEventListener('click', closeShareModal);
     document.getElementById('share-ok').addEventListener('click', doShare);
+    document.getElementById('share-all').addEventListener('click', () => {
+      document.querySelectorAll('#share-char-list input[type=checkbox]').forEach(cb => cb.checked = true);
+      updateShareCount();
+    });
+    document.getElementById('share-none').addEventListener('click', () => {
+      document.querySelectorAll('#share-char-list input[type=checkbox]').forEach(cb => cb.checked = false);
+      updateShareCount();
+    });
     document.getElementById('share-modal').addEventListener('click', e => {
       if (e.target.id === 'share-modal') closeShareModal();
     });

@@ -1,6 +1,8 @@
 /* ============ 聊天页 ============ */
 const Chat = (() => {
   const ctx = { char: null, session: null, chat: [], busy: false };
+  // 会话级"正在生成"标记：file -> 请求序号（作废旧请求时只清自己的标记）
+  const pendingMap = {};
 
   const MULTI_SEP = '|||'; // 多气泡分隔标记
 
@@ -63,6 +65,11 @@ const Chat = (() => {
     await API.saveChat(avatarKey(ctx.char), ctx.session.file, ctx.chat);
   }
 
+  /** 后台写聊天文件：绑定具体会话（avatar/file/chat），不依赖"当前 ctx"（退出/切换会话后仍正确写回） */
+  async function persistChatFor(avatar, file, chat) {
+    await API.saveChat(avatar, file, chat);
+  }
+
   /* ---- 渲染 ---- */
 
   function splitBubbles(text) {
@@ -115,10 +122,10 @@ const Chat = (() => {
       }
     }
 
-    if (ctx.busy) {
+    if (ctx.session && pendingMap[ctx.session.file]) {
       html += `<div class="msg-row ai typing"><div class="avatar">${charAvatarHtml(char)}</div><div class="msg-col"><div class="bubble">正在输入…</div></div></div>`;
     }
-    if (!messages.length && !ctx.busy) {
+    if (!messages.length && !(ctx.session && pendingMap[ctx.session.file])) {
       html = `<div class="msg-time">新会话开始啦，说点什么吧</div>`;
     }
     body.innerHTML = html;
@@ -136,13 +143,18 @@ const Chat = (() => {
     const title = UI.esc(card.title || '');
     const source = UI.esc(card.source || '');
     const thumb = UI.esc(card.thumb || '');
+    // 无图不配缩略图：微信转发卡片没有图时只显示右侧标题/来源
     const thumbHtml = thumb
       ? `<img src="${thumb}" onerror="this.style.display='none'"><span class="chat-card-thumb-fallback">${card.type === 'article' ? '📰' : '🌐'}</span>`
-      : `<span class="chat-card-thumb-fallback">${card.type === 'article' ? '📰' : '🌐'}</span>`;
+      : '';
+    // 附带的话（微信转发：文字在上，卡片在下）
+    const note = String(card.note || '').trim();
+    const noteHtml = note ? `<div class="bubble${isUser ? ' green' : ''}">${UI.esc(note).replace(/\n/g, '<br>')}</div>` : '';
     return `<div class="msg-row ${isUser ? 'user' : 'ai'} card-msg" data-i="${chatIndex}">${avatar}
       <div class="msg-col">
+        ${noteHtml}
         <div class="chat-card" data-card-type="${UI.esc(card.type || '')}" data-card-id="${UI.esc(card.id || '')}">
-          <div class="chat-card-thumb">${thumbHtml}</div>
+          ${thumbHtml ? `<div class="chat-card-thumb">${thumbHtml}</div>` : ''}
           <div class="chat-card-main">
             <div class="chat-card-title">${title}</div>
             <div class="chat-card-source">${source}</div>
@@ -174,6 +186,9 @@ const Chat = (() => {
     const tag = s.match(/^(?:【?朋友圈评论】?)?[\s:：]*对应动态id=[^;]*;?(?:\s*角色=[^;]*;?)?(?:\s*key=[^;]*;?)?(?:\s*时间=[^;]*;?)?\s*评论=\s*/i);
     if (tag) s = s.slice(tag[0].length);
     else s = s.replace(/^对应动态id=[^;]*;?\s*/i, '');
+    // 剥离朋友圈动态存储格式（角色=…;正文=…[;img=…] → 只留正文，去掉 img 生图提示词后缀）
+    const dyn = s.match(/^(?:【?朋友圈动态】?)?[\s:：]*角色=[^;]*;\s*正文=\s*/i);
+    if (dyn) s = s.slice(dyn[0].length).replace(/;img=[^;]*$/i, '').trim();
     s = s.replace(/\*[^*]*\*/g, '');
     // 整条都是括号（纯动作/表情/旁白）→ 丢弃不显示（AI 跑偏时防止刷屏动作）
     if (/^[（(【\[]+[^）)】\]]{1,60}[）)】\]]+$/.test(s.trim())) return '';
@@ -186,8 +201,10 @@ const Chat = (() => {
     const avatar = isUser ? userAvatarHtml() : charAvatarHtml(char);
     const display = isUser ? text : stripActions(text);
     if (!display) return '';
-    const safe = UI.esc(display).replace(/\n/g, '<br>');
-    return `<div class="msg-row ${isUser ? 'user' : 'ai'}" data-i="${chatIndex}">${avatar}<div class="msg-col"><div class="bubble">${safe}</div></div></div>`;
+    // 兼容历史消息里残留的 ||| 拆分：同一头像下渲染成多个气泡
+    const parts = String(display).split(/\|{2,}/).map(p => p.trim()).filter(Boolean);
+    const bubbles = (parts.length ? parts : [display]).map(p => `<div class="bubble">${UI.esc(p).replace(/\n/g, '<br>')}</div>`).join('');
+    return `<div class="msg-row ${isUser ? 'user' : 'ai'}" data-i="${chatIndex}">${avatar}<div class="msg-col">${bubbles}</div></div>`;
   }
 
   /** AI 新回复逐条弹出（仿微信一条一条冒出来，每条带头像） */
@@ -255,6 +272,9 @@ const Chat = (() => {
     ctx.busy = false;
     Store.setCurrent({ charKey: App.charKey(character), charName: App.displayName(character), file: session.file, title: session.title });
     App.showPage('page-chat', render);
+    // 打开会话即已读，清掉未读红点
+    Store.touchSession(App.charKey(character), App.displayName(character), session.file, { unread: 0 });
+    if (typeof ChatList !== 'undefined' && ChatList.refreshTabBadge) ChatList.refreshTabBadge();
     try {
       ctx.chat = await loadChat(character, session);
       render();
@@ -264,8 +284,8 @@ const Chat = (() => {
   }
 
   /* ---- 构建模型上下文 ---- */
-  function buildSystemPrompt() {
-    const c = ctx.char;
+  function buildSystemPrompt(char) {
+    const c = char || ctx.char;
     const parts = [];
     // Player 身份（账号切换后这里随之变化）
     let player = null;
@@ -289,14 +309,18 @@ const Chat = (() => {
     return parts.join('\n');
   }
 
-  function buildHistory() {
-    const msgs = ctx.chat.slice(1).filter(m => !m.is_system);
+  function buildHistory(chat) {
+    const msgs = (chat || ctx.chat).slice(1).filter(m => !m.is_system);
     // 多气泡拆成独立消息，让模型学到"分多条发"的微信格式（避免学成换行 \n\n）
     const out = [];
     for (const m of msgs) {
       const content = String(m.mes || '').trim();
       if (!content) continue;
-      if (m.is_user) out.push({ role: 'user', content });
+      if (m.is_user) {
+        // 兼容历史里残留 |||：拆成多条 user 消息，让模型学到"分多条发"
+        const ub = String(content).split(/\|{2,}/).map(p => p.trim()).filter(Boolean);
+        (ub.length ? ub : [content]).forEach(b => out.push({ role: 'user', content: b }));
+      }
       else {
         // 喂给模型的历史也按显示层清洗（剥括号/标记），避免模型从旧脏数据里学到错误格式
         const cleaned = stripActions(content);
@@ -312,63 +336,223 @@ const Chat = (() => {
   // 在途 AI 请求版本号：撤回/删除/重说时递增，使未完成的旧请求作废，避免残留/乱序
   let reqSeq = 0;
 
-  /** 请求 AI 回复（send / 撤回 / 重说共用）；extraEvent 为附加的事件提示（作为 user 消息末尾追加，不进历史） */
-  async function askAI(extraEvent) {
-    const myReq = ++reqSeq;
-    ctx.busy = true;
-    render();
+  /** 请求 AI 回复（send / 撤回 / 重说 / 后台分享共用）；extraEvent 为附加的事件提示（作为 user 消息末尾追加，不进历史）；opts 可指定目标会话（后台发送用，不依赖当前 ctx） */
+  async function askAI(extraEvent, opts) {
+    opts = opts || {};
+    // 绑定本次请求对应的会话（不依赖"当前 ctx"：退出/切换会话后仍在后台加载，只把结果写回该会话）
+    const myChar = opts.char || ctx.char;
+    const myCharKey = opts.charKey || App.charKey(myChar);
+    const myCharName = opts.charName || App.displayName(myChar);
+    const myFile = opts.file || ctx.session.file;
+    const myChat = opts.chat || ctx.chat;
+    const myAvatar = opts.avatar || avatarKey(myChar);
+    const isBg = !!opts.char;   // 后台请求（分享/推送）：独立并行，不参与 reqSeq 作废（否则并发互相作废只剩最后一个）
+    const myReq = isBg ? -1 : ++reqSeq;
+    pendingMap[myFile] = myReq;
+    // 是否正打开该会话（决定弹气泡 + 未读）：仅当走"当前 ctx"且页面可见
+    const viewing = !opts.char && ctx.session && ctx.session.file === myFile && isChatPageVisible();
+    if (viewing) render(); // 显示"正在输入…"
+    // 后台触发的回复（分享/主动推送）：按「AI 回复行为」配置延迟或选择性不回（当面聊天始终立即回）
+    if (opts.char) {
+      const ab = (App.state && App.state.config && App.state.config.aiBehavior) || null;
+      if (ab) {
+        if (ab.skipReply && Math.random() * 100 < (ab.skipRate || 0)) {
+          if (pendingMap[myFile] === myReq) delete pendingMap[myFile];
+          return; // 选择性不回：AI 不生成（消息已保留）
+        }
+        if (ab.delayReply) {
+          const dmin = Math.max(0, (ab.delayMin || 30) * 1000);
+          const dmax = Math.max(dmin, (ab.delayMax || 180) * 1000);
+          await new Promise(r => setTimeout(r, dmin + Math.random() * (dmax - dmin)));
+        }
+      }
+    }
     try {
-      await persistChat();
-      const hist = buildHistory();
+      await persistChatFor(myAvatar, myFile, myChat);
+      const hist = buildHistory(myChat);
       if (extraEvent) hist.push({ role: 'user', content: extraEvent });
-      const messages = [{ role: 'system', content: buildSystemPrompt() }, ...hist];
+      const messages = [{ role: 'system', content: buildSystemPrompt(myChar) }, ...hist];
       const reply = await API.genChat(messages, { temperature: 0.9 });
-      if (myReq !== reqSeq) return; // 已被撤回/删除/重说作废，不写入
+      if (!isBg && myReq !== reqSeq) { if (pendingMap[myFile] === myReq) delete pendingMap[myFile]; return; } // 已被撤回/删除/重说作废，不写入
       const content = (reply.content || '').trim();
       // 保存 AI 回复（保留 ||| 原始内容）
-      ctx.chat.push({
-        name: ctx.char.name,
+      myChat.push({
+        name: myCharName,
         is_user: false,
         is_name: false,
         send_date: new Date().toISOString(),
         mes: content,
         extra: { api: 'wechat-h5', model: App.state.config?.chatModel || '' },
       });
-      await persistChat();
-      // 更新会话预览（清洗括号动作/心理，避免列表页露出“（某动作）”）
+      await persistChatFor(myAvatar, myFile, myChat);
+      if (pendingMap[myFile] === myReq) delete pendingMap[myFile];
+      // 私聊建群：AI 回复提到「拉群/建群 + 成员名」→ 真建群（AI 角色当群主）。受群活跃的 aiManage 开关控制
+      maybeDmGroupCreate(content, myChar, myChat);
+      // 未读计数：用户此刻正打开该会话且聊天页可见 → 不算未读；否则 +1
+      const s = Store.sessionsOf(myCharKey, myCharName).find(x => x.file === myFile);
       const preview = stripActions(splitBubbles(content)[0] || '');
-      Store.touchSession(App.charKey(ctx.char), ctx.char.name, ctx.session.file, { preview: preview.slice(0, 60), updatedAt: Date.now() });
-      ctx.busy = false;
-      const bubbles = splitBubbles(content);
-      if (bubbles.length) {
-        appendReplyBubbles(bubbles, ctx.chat.length - 1); // 逐条弹出
-      } else {
-        render();
+      Store.touchSession(myCharKey, myCharName, myFile, {
+        preview: preview.slice(0, 60),
+        updatedAt: Date.now(),
+        unread: viewing ? 0 : ((s && s.unread) || 0) + 1,
+      });
+      // 若用户已退出该聊天页：实时刷新会话列表（未读红点 / 预览）
+      if (!viewing && typeof ChatList !== 'undefined') ChatList.render();
+      // 若当前正打开该会话 → 逐条弹出；否则只写回文件，回来时重新渲染
+      if (viewing) {
+        const bubbles = splitBubbles(content);
+        if (bubbles.length) appendReplyBubbles(bubbles, myChat.length - 1);
+        else render();
       }
     } catch (e) {
-      if (myReq !== reqSeq) return;
+      if (!isBg && myReq !== reqSeq) { if (pendingMap[myFile] === myReq) delete pendingMap[myFile]; return; }
+      if (pendingMap[myFile] === myReq) delete pendingMap[myFile];
       UI.toast('回复失败：' + e.message);
-      ctx.busy = false;
-      render();
+      if (ctx.session && ctx.session.file === myFile) { ctx.busy = false; render(); }
     }
+  }
+
+  /** 后台发送到指定角色私信（不切换页面）：写用户消息 + 触发 AI 后台生成 + 未读+1 */
+  async function sendToCharBackground(char, session, text, extra) {
+    if (!char || !session || !text) return;
+    const avatar = avatarKey(char);
+    const file = session.file;
+    const chat = await loadChat(char, session);
+    chat.push({
+      name: 'user', is_user: true, is_name: true, send_date: new Date().toISOString(), mes: text,
+      ...(extra ? { extra } : {}),
+    });
+    await persistChatFor(avatar, file, chat);
+    const key = App.charKey(char);
+    const name = App.displayName(char);
+    const s = Store.sessionsOf(key, name).find(x => x.file === file);
+    // 未读由 askAI 统一处理（生成回复后 +1；选择性不回则保持原样）；这里只刷新预览
+    Store.touchSession(key, name, file, {
+      preview: stripActions(splitBubbles(text)[0] || '').slice(0, 60),
+      updatedAt: Date.now(),
+    });
+    if (typeof ChatList !== 'undefined') ChatList.render();
+    askAI(null, { char, charKey: key, charName: name, file, chat, avatar });
+  }
+
+  /** 私聊建群：AI 回复提到「拉群/建群」→ 真建群（AI 角色当群主，玩家不用自己建）。受群活跃 aiManage 开关控制 */
+  const dmGroupCooldown = {};
+  async function maybeDmGroupCreate(text, char, recentMsgs) {
+    try {
+      const cfg = (App.state && App.state.config) || {};
+      const ga = cfg.groupActive || {};
+      if (!ga.aiManage) return;
+      const ck = App.charKey(char);
+      if (dmGroupCooldown[ck] && Date.now() - dmGroupCooldown[ck] < 60000) return;
+      // 意图：拉群/建群/开群/组群 + 说"群名就叫XX"或"已经拉好"也算
+      const intentRe = /拉.{0,10}(群|群聊)|建.{0,8}(群|群聊)|开.{0,8}(群|群聊)|组.{0,6}(个)?群|群名(就)?(是|叫|取|为)|拉好.{0,6}了|建好.{0,6}了|弄好.{0,6}了/;
+      // 扫描范围：AI 回复 + 最近 10 条历史（玩家说"拉上五条和夏油"往往在更早的消息里）
+      const hist = (recentMsgs || []).slice(-10).map(m => m.mes || '');
+      const scan = [text, ...hist].join(' ');
+      if (!intentRe.test(scan)) return;
+      // 群名：AI 回复里「群名(就)叫「XXX」/群名叫XXX」（尽量取最新）
+      let gname = '';
+      const nms = [...String(text).matchAll(/群名(就)?(是|叫|取|为)?[「"“]?([^」"”\s，。！？]{2,14})/g)];
+      if (nms.length) gname = nms[nms.length - 1][3].trim();
+      // 成员：扫描文本里出现的通讯录角色名（支持 2 字简称，如「夏油」匹配「夏油杰」；排除 AI 自己）
+      const aiKey = App.charKey(char);
+      const aiName = App.displayName(char);
+      const keys = [aiKey];
+      for (const c of App.state.characters) {
+        const k = App.charKey(c);
+        if (k === aiKey) continue;
+        // 候选名：备注名 / 角色名 / 各取前 2 字 / 4 字名取后 2 字
+        const cands = new Set();
+        const dn = App.displayName(c), rn = String(c.name || '').trim();
+        for (const s of [dn, rn]) {
+          if (s && s.length >= 2) cands.add(s);
+          if (s && s.length > 2) cands.add(s.slice(0, 2));
+          if (s && s.length === 4) cands.add(s.slice(2));
+        }
+        let hit = false;
+        for (const cn of cands) { if (cn && scan.indexOf(cn) >= 0) { hit = true; break; } }
+        if (hit && keys.length < 4) keys.push(k);
+      }
+      if (keys.length < 2) return; // 至少要 AI 自己 + 1 个成员
+      if (!gname) gname = aiName + ' 的群';
+      dmGroupCooldown[ck] = Date.now();
+      // 玩家自动在群里（微信里玩家天然在群里）
+      try {
+        const p = (typeof Me !== 'undefined') ? Me.activePlayer() : null;
+        const pk = p ? '__me__' + p.id : '';
+        if (pk && keys.indexOf(pk) < 0) keys.push(pk);
+      } catch (e) {}
+      await API.createWeChatGroup(gname, keys, aiKey);
+      UI.toast('「' + aiName + '」创建了群「' + gname + '」');
+      if (typeof ChatList !== 'undefined' && ChatList.render) ChatList.render();
+      if (typeof GroupChat !== 'undefined' && GroupChat.replyGroupBackground) {
+        GroupChat.replyGroupBackground(gname, '这是一个刚建好的新群，你是群主。按你自己的性格随便开口说一句就行（不要客套，别说"请多关照"这类官话），其他成员自然回应。');
+      }
+    } catch (e) {}
+  }
+
+  /** 角色主动给玩家发私信（禁言/事件触发）：AI 生成角色口吻的一句话写进该角色会话并未读+1（玩家回复后自然延续） */
+  async function sendCharMessageToPlayer(char, session, eventText) {
+    if (!char || !session) return;
+    const avatar = avatarKey(char);
+    const file = session.file;
+    const chat = await loadChat(char, session);
+    const hist = buildHistory(chat).slice(-8);
+    const name = App.displayName(char);
+    const messages = [
+      { role: 'system', content: buildSystemPrompt(char) },
+      ...hist,
+      { role: 'user', content: '（新事件：' + eventText + '）现在你是「' + name + '」，主动给玩家发一条微信消息，围绕这件事自然地说一句话（质问、吐槽、解释都行，符合你的性格）。只发说出口的话，口语化，不要动作/表情/心理描写，不要括号，不要解释自己。' },
+    ];
+    try {
+      const reply = await API.genChat(messages, { temperature: 0.9, max_tokens: 200 });
+      const content = stripActions(splitBubbles((reply.content || '').trim())[0] || '');
+      if (!content) return;
+      chat.push({
+        name, is_user: false, is_name: false, send_date: new Date().toISOString(), mes: content,
+        extra: { api: 'wechat-h5', model: App.state.config?.chatModel || '' },
+      });
+      await persistChatFor(avatar, file, chat);
+      const key = App.charKey(char);
+      const s = Store.sessionsOf(key, name).find(x => x.file === file);
+      Store.touchSession(key, name, file, {
+        preview: content.slice(0, 60),
+        updatedAt: Date.now(),
+        unread: ((s && s.unread) || 0) + 1,
+      });
+      if (typeof ChatList !== 'undefined' && ChatList.render) ChatList.render();
+    } catch (e) { /* 生成失败静默 */ }
+  }
+
+  function isChatPageVisible() {
+    const p = document.getElementById('page-chat');
+    return p && p.style.display !== 'none';
   }
 
   async function send(text, extra) {
     text = (text || '').trim();
-    if (!text || ctx.busy) return;
+    if (!text) return;
+    if (ctx.busy || (ctx.session && pendingMap[ctx.session.file])) {
+      UI.toast('AI 还在回复中，稍等一下');
+      return;
+    }
     const input = document.getElementById('chat-input');
     input.value = '';
     autoResize(input);
-    // 追加用户消息（extra 用于卡片转发等元数据）
-    ctx.chat.push({
-      name: 'user',
-      is_user: true,
-      is_name: true,
-      send_date: new Date().toISOString(),
-      mes: text,
-      ...(extra ? { extra } : {}),
+    // 追加用户消息（extra 用于卡片转发等元数据）；支持用 || 或 ||| 拆成多条连发（模拟微信发多条）
+    const parts = String(text).split(/\|{2,}/).map(p => p.trim()).filter(Boolean);
+    (parts.length ? parts : [text]).forEach((part, i) => {
+      ctx.chat.push({
+        name: 'user',
+        is_user: true,
+        is_name: true,
+        send_date: new Date().toISOString(),
+        mes: part,
+        ...(extra && i === 0 ? { extra } : {}),
+      });
     });
-    await askAI();
+    // 不 await：发出后即可退出聊天页，AI 在后台加载
+    askAI();
   }
 
   /* ---- 输入框自适应 ---- */
@@ -543,5 +727,5 @@ const Chat = (() => {
     bindLongPress();
   }
 
-  return { open, createSession, createGreetingSession, deleteSession, send, init };
+  return { open, createSession, createGreetingSession, deleteSession, send, sendToCharBackground, sendCharMessageToPlayer, init };
 })();

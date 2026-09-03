@@ -59,6 +59,24 @@ const API = (() => {
     deleteArticle: (id) => requireBridge().deleteArticle(id),
     genArticle: (data) => requireBridge().genArticle(data),
 
+    /* --- 群聊 --- */
+    listWeChatGroups: () => requireBridge().listWeChatGroups(),
+    getWeChatGroup: (name) => requireBridge().getWeChatGroup(name),
+    createWeChatGroup: (name, memberKeys, ownerKey) => requireBridge().createWeChatGroup(name, memberKeys, ownerKey),
+    deleteWeChatGroup: (name) => requireBridge().deleteWeChatGroup(name),
+    saveWeChatMessage: (name, msg) => requireBridge().saveWeChatMessage(name, msg),
+    genGroupReply: (data) => requireBridge().genGroupReply(data),
+    getWeChatGroupInfo: (name) => requireBridge().getWeChatGroupInfo(name),
+    updateWeChatGroup: (name, patch) => requireBridge().updateWeChatGroup(name, patch),
+    setGroupAdmin: (name, key, isAdmin) => requireBridge().setGroupAdmin(name, key, isAdmin),
+    transferGroupOwner: (name, newOwnerKey) => requireBridge().transferGroupOwner(name, newOwnerKey),
+    addGroupMember: (name, key) => requireBridge().addGroupMember(name, key),
+    muteGroupMember: (name, key, untilTs) => requireBridge().muteGroupMember(name, key, untilTs),
+    kickGroupMember: (name, key) => requireBridge().kickGroupMember(name, key),
+    clearGroupUnread: (name) => requireBridge().clearGroupUnread(name),
+    deleteWeChatMessage: (name, idx) => requireBridge().deleteWeChatMessage(name, idx),
+    clearWeChatGroupMessages: (name) => requireBridge().clearWeChatGroupMessages(name),
+
     /* --- 设置 --- */
     getSettings: () => requireBridge().getSettings(),
     saveAppSettings: (patch) => { requireBridge().saveAppSettings(patch || {}); return true; },

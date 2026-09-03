@@ -14,35 +14,99 @@ const ChatList = (() => {
     return items;
   }
 
+  function totalUnread() {
+    let n = 0;
+    for (const c of App.state.characters) {
+      const ss = Store.sessionsOf(App.charKey(c), c.name);
+      for (const s of ss) n += (s.unread || 0);
+    }
+    return n;
+  }
+
+  /** 底部"微信"Tab 总未读红点 */
+  function refreshTabBadge() {
+    const tab = document.getElementById('tab-chatlist');
+    if (!tab) return;
+    const n = totalUnread();
+    let b = tab.querySelector('.tab-badge');
+    if (n > 0) {
+      if (!b) { b = document.createElement('span'); b.className = 'tab-badge'; tab.appendChild(b); }
+      b.textContent = n > 99 ? '99+' : n;
+    } else if (b) b.remove();
+  }
+
   function render() {
     const body = document.getElementById('chatlist-body');
     const items = collectSessions();
-    if (!items.length) {
-      body.innerHTML = `<div class="empty"><div class="big">💬</div>还没有会话<br><br>去「通讯录」选一个角色开始聊天吧</div>`;
-      return;
-    }
-    const html = items.map(it => {
-      const c = it.char;
-      const s = it.session;
-      const avatar = UI.avatarSrc(c.avatar) ? `<img src="${UI.esc(UI.avatarSrc(c.avatar))}">` : '';
-      return `<div class="list-item session-item" data-key="${UI.esc(App.charKey(c))}" data-file="${UI.esc(s.file)}">
-        <div class="avatar">${avatar}</div>
-        <div class="list-main">
-          <div class="list-title">${UI.esc((typeof Detail !== 'undefined' && Detail.shownName) ? Detail.shownName(c) : App.displayName(c))}</div>
-          <div class="list-sub">${UI.esc(window.stripActions ? window.stripActions(s.preview || '') : (s.preview || '开始聊天吧'))}</div>
-        </div>
-        <div class="list-meta">${UI.fmtTime(s.updatedAt)}</div>
-      </div>`;
-    }).join('');
-    body.innerHTML = `<div class="list">${html}</div>`;
-    body.querySelectorAll('.session-item').forEach(el => {
-      el.addEventListener('click', () => {
-        const c = App.charByKey(el.dataset.key);
-        if (!c) return;
-        const s = Store.sessionsOf(App.charKey(c), c.name).find(x => x.file === el.dataset.file);
-        if (c && s) Chat.open(c, s);
+    // 并行拉群聊，合并到会话列表
+    Promise.all([
+      Promise.resolve(items),
+      (typeof API.listWeChatGroups === 'function') ? API.listWeChatGroups().catch(() => []) : Promise.resolve([]),
+    ]).then(([chatItems, groups]) => {
+      const rows = [
+        ...(groups || []).map(g => ({ type: 'group', g, ts: g.lastTime ? new Date(g.lastTime) : new Date(g.createdAt || 0) })),
+        ...chatItems.map(it => ({ type: 'chat', it, ts: new Date(it.session.updatedAt || 0) })),
+      ].sort((a, b) => b.ts - a.ts);
+      if (!rows.length) {
+        body.innerHTML = `<div class="empty"><div class="big">💬</div>还没有会话<br><br>去「通讯录」选一个角色开始聊天吧</div>`;
+        refreshTabBadge();
+        return;
+      }
+      const html = rows.map(row => {
+        if (row.type === 'group') return groupRowHtml(row.g);
+        const c = row.it.char;
+        const s = row.it.session;
+        const avatar = UI.avatarSrc(c.avatar) ? `<img src="${UI.esc(UI.avatarSrc(c.avatar))}">` : '';
+        const unread = (s.unread || 0);
+        const badge = unread > 0 ? `<span class="list-badge avatar-badge">${unread > 99 ? '99+' : unread}</span>` : '';
+        return `<div class="list-item session-item" data-key="${UI.esc(App.charKey(c))}" data-file="${UI.esc(s.file)}">
+          <div class="avatar-wrap">${avatar ? `<div class="avatar">${avatar}</div>` : `<div class="avatar"></div>`}${badge}</div>
+          <div class="list-main">
+            <div class="list-title">${UI.esc((typeof Detail !== 'undefined' && Detail.shownName) ? Detail.shownName(c) : App.displayName(c))}</div>
+            <div class="list-sub">${UI.esc(window.stripActions ? window.stripActions(s.preview || '') : (s.preview || '开始聊天吧'))}</div>
+          </div>
+          <div class="list-meta">${UI.fmtTime(s.updatedAt)}</div>
+        </div>`;
+      }).join('');
+      body.innerHTML = `<div class="list">${html}</div>`;
+      body.querySelectorAll('.session-item').forEach(el => {
+        el.addEventListener('click', () => {
+          const c = App.charByKey(el.dataset.key);
+          if (!c) return;
+          const s = Store.sessionsOf(App.charKey(c), c.name).find(x => x.file === el.dataset.file);
+          if (c && s) Chat.open(c, s);
+        });
       });
+      body.querySelectorAll('.group-item').forEach(el => {
+        el.addEventListener('click', () => {
+          if (typeof GroupChat !== 'undefined' && GroupChat.openGroupChat) GroupChat.openGroupChat(el.dataset.name, 'page-chatlist');
+        });
+      });
+      refreshTabBadge();
     });
+  }
+
+  function groupRowHtml(g) {
+    const unread = (g.unread || 0);
+    const badge = unread > 0 ? `<span class="list-badge avatar-badge">${unread > 99 ? '99+' : unread}</span>` : '';
+    const avatar = g.avatar
+      ? `<img src="${UI.esc(g.avatar)}">`
+      : (groupAvatarImg(g));
+    const preview = g.lastPreview ? UI.esc(window.stripActions ? window.stripActions(g.lastPreview) : g.lastPreview) : '群聊已创建，快来发第一条消息吧';
+    return `<div class="list-item group-item" data-name="${UI.esc(g.name)}">
+      <div class="avatar-wrap"><div class="avatar g-avatar">${avatar}</div>${badge}</div>
+      <div class="list-main">
+        <div class="list-title">${UI.esc(g.displayName || g.name)}（${(g.memberKeys || []).length}）</div>
+        <div class="list-sub">${preview}</div>
+      </div>
+      <div class="list-meta">${g.lastTime ? UI.fmtTime(g.lastTime) : ''}</div>
+    </div>`;
+  }
+  function groupAvatarImg(g) {
+    const key = (g.memberKeys && g.memberKeys[0]) || '';
+    const c = key ? App.charByKey(key) : null;
+    if (c && UI.avatarSrc(c.avatar)) return `<img src="${UI.esc(UI.avatarSrc(c.avatar))}">`;
+    return '<span class="g-avatar-fallback">👥</span>';
   }
 
   function initAddButton() {
@@ -77,5 +141,5 @@ const ChatList = (() => {
     });
   }
 
-  return { render, initAddButton };
+  return { render, initAddButton, totalUnread, refreshTabBadge };
 })();
