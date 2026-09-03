@@ -156,7 +156,8 @@ const Articles = (() => {
     if (delBtn) delBtn.style.display = imgEnabled() ? '' : 'none';
   }
   function backFromRead() {
-    App.showTab('articles');
+    const h = App.consumeBack();
+    if (h) h(); else App.showTab('articles');
   }
 
   /* ---- 分享文章到私信（转发卡片，AI 能读到公众号与内容） ---- */

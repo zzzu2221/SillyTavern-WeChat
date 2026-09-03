@@ -614,3 +614,23 @@ body {
 
 /* ===== tag 自动加入徽标 ===== */
 .friend-auto { display: inline-block; font-size: 11px; color: #07c160; background: #e8f8ef; border-radius: 4px; padding: 1px 5px; margin-left: 4px; vertical-align: middle; }
+
+/* ===== 朋友圈单条详情页 ===== */
+.page-full#page-moment-detail { background: #ededed; }
+.moment-detail { max-width: 640px; margin: 0 auto; background: #fff; min-height: 100%; }
+.md-head { display: flex; align-items: center; padding: 16px 14px 6px; }
+.md-avatar { width: 56px; height: 56px; border-radius: 8px; margin-right: 12px; flex: none; }
+.md-avatar img { width: 100%; height: 100%; border-radius: 8px; object-fit: cover; }
+.md-head-main { display: flex; flex-direction: column; }
+.md-name { font-size: 16px; font-weight: 600; color: #1a1a1a; }
+.md-time { font-size: 12px; color: #999; margin-top: 3px; }
+.md-text { padding: 8px 14px 4px; font-size: 15px; line-height: 1.6; color: #1a1a1a; white-space: normal; word-break: break-word; }
+.md-imgs { padding: 10px 14px 4px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.md-img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px; }
+.md-actions { display: flex; gap: 10px; padding: 12px 14px 4px; }
+.md-btn { border: none; background: #f7f7f7; border-radius: 6px; padding: 6px 14px; font-size: 13px; color: #576b95; cursor: pointer; }
+.md-btn.btn-del { color: #d9534f; margin-left: auto; }
+.md-comments { margin: 10px 14px 20px; background: #f7f7f7; border-radius: 6px; padding: 8px 10px; }
+.md-comments .comment-item { font-size: 14px; line-height: 1.6; margin-bottom: 6px; }
+.md-comments .comment-item:last-child { margin-bottom: 0; }
+.md-no-comment { color: #999; font-size: 13px; text-align: center; padding: 8px 0; }

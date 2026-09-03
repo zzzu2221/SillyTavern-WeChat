@@ -151,13 +151,17 @@ const Chat = (() => {
       </div></div>`;
   }
 
-  /** 卡片点击：跳回原文（朋友圈 / 公众号阅读页） */
+  /** 卡片点击：跳回原文（朋友圈 / 公众号阅读页）；记录来源以便返回时回到聊天页 */
   function openCard(type, id) {
     if (!id) return;
+    App.setBackHandler(() => {
+      if (ctx.char && ctx.session) Chat.open(ctx.char, ctx.session);
+      else App.showPage('page-chat', render);
+    });
     if (type === 'article') {
       try { Articles.openReadById(id); } catch (e) { UI.toast('无法打开推文：' + (e && e.message)); }
     } else if (type === 'moment') {
-      try { Moments.openPostById(id); } catch (e) { UI.toast('无法打开朋友圈：' + (e && e.message)); }
+      try { Moments.openPostDetail(id); } catch (e) { UI.toast('无法打开朋友圈：' + (e && e.message)); }
     }
   }
 
@@ -166,6 +170,10 @@ const Chat = (() => {
    *  句中括号动作整段删（“别哭了(递过纸巾)”→“别哭了”）；整条就是括号的去括号保留台词（“(撤回也没用哦)”→“撤回也没用哦”） */
   function stripActions(text) {
     let s = String(text || '');
+    // 剥离 AI 复读的存储标记前缀（“对应动态id=…;角色=…;评论=真实内容”→ 只留真实内容；聊天/分享场景兜底）
+    const tag = s.match(/^(?:【?朋友圈评论】?)?[\s:：]*对应动态id=[^;]*;?(?:\s*角色=[^;]*;?)?(?:\s*key=[^;]*;?)?(?:\s*时间=[^;]*;?)?\s*评论=\s*/i);
+    if (tag) s = s.slice(tag[0].length);
+    else s = s.replace(/^对应动态id=[^;]*;?\s*/i, '');
     s = s.replace(/\*[^*]*\*/g, '');
     // 整条都是括号（纯动作/表情/旁白）→ 丢弃不显示（AI 跑偏时防止刷屏动作）
     if (/^[（(【\[]+[^）)】\]]{1,60}[）)】\]]+$/.test(s.trim())) return '';
@@ -290,7 +298,10 @@ const Chat = (() => {
       if (!content) continue;
       if (m.is_user) out.push({ role: 'user', content });
       else {
-        for (const b of splitBubbles(content)) out.push({ role: 'assistant', content: b });
+        // 喂给模型的历史也按显示层清洗（剥括号/标记），避免模型从旧脏数据里学到错误格式
+        const cleaned = stripActions(content);
+        if (!cleaned) continue;
+        for (const b of splitBubbles(cleaned)) out.push({ role: 'assistant', content: b });
       }
     }
     return out.slice(-24);
@@ -324,8 +335,8 @@ const Chat = (() => {
         extra: { api: 'wechat-h5', model: App.state.config?.chatModel || '' },
       });
       await persistChat();
-      // 更新会话预览
-      const preview = splitBubbles(content)[0] || '';
+      // 更新会话预览（清洗括号动作/心理，避免列表页露出“（某动作）”）
+      const preview = stripActions(splitBubbles(content)[0] || '');
       Store.touchSession(App.charKey(ctx.char), ctx.char.name, ctx.session.file, { preview: preview.slice(0, 60), updatedAt: Date.now() });
       ctx.busy = false;
       const bubbles = splitBubbles(content);

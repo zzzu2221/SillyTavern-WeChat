@@ -29,7 +29,7 @@ const ChatList = (() => {
         <div class="avatar">${avatar}</div>
         <div class="list-main">
           <div class="list-title">${UI.esc((typeof Detail !== 'undefined' && Detail.shownName) ? Detail.shownName(c) : App.displayName(c))}</div>
-          <div class="list-sub">${UI.esc(s.preview || '开始聊天吧')}</div>
+          <div class="list-sub">${UI.esc(window.stripActions ? window.stripActions(s.preview || '') : (s.preview || '开始聊天吧'))}</div>
         </div>
         <div class="list-meta">${UI.fmtTime(s.updatedAt)}</div>
       </div>`;

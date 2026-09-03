@@ -98,6 +98,13 @@ const App = (() => {
     if (renderFn) renderFn();
   }
 
+  /* ---- 返回来源记忆：从聊天页点卡片跳到原文（朋友圈详情/公众号阅读）时记录来源，返回时回到原处 ---- */
+  let backHandler = null;
+  function setBackHandler(fn) { backHandler = (typeof fn === 'function') ? fn : null; }
+  function hasBack() { return !!backHandler; }
+  /** 取走并执行返回处理器；没有则返回 null（调用方按默认返回处理） */
+  function consumeBack() { const h = backHandler; backHandler = null; return h; }
+
   /* ---- 角色相关辅助 ---- */
   function charKey(c) { return c && (c.key || c.avatar_file || c.name) ? String(c.key || c.avatar_file || c.name) : ''; }
   function displayName(c) { return (c && c.displayName) || (c && c.name) || ''; }
@@ -160,6 +167,7 @@ const App = (() => {
     refreshCharacters, loadConfig,
     effectiveWhitelist,
     charByName, charByKey, charByAvatar, charKey, displayName, openCharacter,
+    setBackHandler, hasBack, consumeBack,
   };
 })();
 

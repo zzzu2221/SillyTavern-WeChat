@@ -36,6 +36,23 @@ const Moments = (() => {
     return cfg.imageEnabled !== false;
   }
 
+  /** 剥离 AI 偶尔复读的存储标记前缀（“对应动态id=…;角色=…;评论=真实内容”），兜底清洗 */
+  function cleanCommentTag(t) {
+    let s = String(t == null ? '' : t).trim();
+    if (!s) return s;
+    // 完整标记前缀：对应动态id=…;角色=…;评论=…
+    const m = s.match(/^(?:【?朋友圈评论】?)?[\s:：]*对应动态id=[^;]*;\s*角色=[^;]*;\s*(?:key=[^;]*;\s*)?(?:时间=[^;]*;\s*)?评论=\s*/i);
+    if (m) return s.slice(m[0].length).trim();
+    // 截断式：只剩“对应动态id=…;评论=…”等变体
+    s = s.replace(/^(?:【?朋友圈评论】?)?[\s:：]*对应动态id=[^;]*;?(?:\s*角色=[^;]*;?)?(?:\s*key=[^;]*;?)?(?:\s*时间=[^;]*;?)?\s*评论=\s*/i, '');
+    return s.trim();
+  }
+  /** 评论显示文本：括号清洗 + 标记剥离 */
+  function commentText(t) {
+    const clean = cleanCommentTag(t);
+    return window.stripActions ? window.stripActions(clean) : clean;
+  }
+
   function filteredPosts() {
     if (!filterKey) return posts;
     return posts.filter(p => p.key === filterKey || p.character === (filterCharName || ''));
@@ -91,7 +108,7 @@ const Moments = (() => {
           ? `<div class="moment-img-wrap"><img src="${UI.esc(p.img)}" class="moment-img" data-src="${UI.esc(p.img)}" loading="lazy"></div>`
           : '';
         const commentsHtml = (p.comments || []).map(cm =>
-          `<div class="comment-item"><span class="cname">${UI.esc(cm.character)}</span>：${UI.esc(window.stripActions ? window.stripActions(cm.text) : cm.text)}<span class="comment-del" data-idx="${idx}" data-time="${UI.esc(cm.time)}" data-key="${UI.esc(cm.key || '')}">✕</span></div>`
+          `<div class="comment-item"><span class="cname">${UI.esc(cm.character)}</span>：${UI.esc(commentText(cm.text))}<span class="comment-del" data-idx="${idx}" data-time="${UI.esc(cm.time)}" data-key="${UI.esc(cm.key || '')}">✕</span></div>`
         ).join('');
         return `
         <div class="moment-card" data-idx="${idx}" data-mid="${UI.esc(p.id)}">
@@ -184,6 +201,81 @@ const Moments = (() => {
       el.classList.add('flash-highlight');
       setTimeout(() => el.classList.remove('flash-highlight'), 2200);
     }
+  }
+
+  /* ---- 朋友圈单条详情（从转发卡片进入，仿微信单条详情页） ---- */
+  let detailPost = null;
+  function renderDetail(p) {
+    detailPost = p;
+    const body = document.getElementById('moment-detail-body');
+    if (!body) return;
+    const info = posterInfo(p);
+    const avatar = UI.avatarSrc(info.avatar) ? `<img src="${UI.esc(UI.avatarSrc(info.avatar))}">` : '';
+    const imgs = (Array.isArray(p.img) ? p.img : (p.img ? [p.img] : [])).filter(Boolean);
+    const imgHtml = imgs.map(src => `<img src="${UI.esc(src)}" class="md-img" data-src="${UI.esc(src)}" loading="lazy">`).join('');
+    const commentsHtml = (p.comments || []).map(cm =>
+      `<div class="comment-item"><span class="cname">${UI.esc(cm.character)}</span>：${UI.esc(commentText(cm.text))}<span class="comment-del" data-time="${UI.esc(cm.time)}" data-key="${UI.esc(cm.key || '')}">✕</span></div>`
+    ).join('');
+    body.innerHTML = `
+      <div class="moment-detail" data-mid="${UI.esc(p.id)}">
+        <div class="md-head">
+          <div class="avatar md-avatar">${avatar}</div>
+          <div class="md-head-main">
+            <div class="md-name">${UI.esc(info.name)}</div>
+            <div class="md-time">${UI.fmtTime(p.time)}</div>
+          </div>
+        </div>
+        ${p.text ? `<div class="md-text">${UI.esc(commentText(p.text)).replace(/\n/g, '<br>')}</div>` : ''}
+        ${imgHtml ? `<div class="md-imgs">${imgHtml}</div>` : ''}
+        <div class="md-actions">
+          <button class="md-btn btn-comment">评论</button>
+          <button class="md-btn btn-share">分享</button>
+          <button class="md-btn btn-del">删除动态</button>
+        </div>
+        <div class="md-comments">${commentsHtml || '<div class="md-no-comment">还没有评论</div>'}</div>
+      </div>`;
+    body.querySelectorAll('.md-img').forEach(img => img.addEventListener('click', () => UI.lightbox(img.dataset.src)));
+    const btnC = body.querySelector('.btn-comment');
+    if (btnC) btnC.addEventListener('click', () => openCommentModal(p));
+    const btnS = body.querySelector('.btn-share');
+    if (btnS) btnS.addEventListener('click', () => openShareModal(p));
+    const del = body.querySelector('.btn-del');
+    if (del) {
+      del.style.display = imgEnabled() ? '' : 'none'; // 生图开关关闭时隐藏删除（含动态删除）
+      del.addEventListener('click', async () => {
+        const ok = await UI.confirm('删除这条动态及其全部评论？', { okText: '删除' });
+        if (!ok) return;
+        try {
+          await API.deleteMoment(p.id);
+          UI.toast('已删除');
+          backFromDetail();
+        } catch (e) { UI.toast('删除失败：' + e.message); }
+      });
+    }
+    body.querySelectorAll('.comment-del').forEach(el => {
+      el.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        const ok = await UI.confirm('删除这条评论？', { okText: '删除' });
+        if (!ok) return;
+        try {
+          await API.deleteComment(p.id, el.dataset.time, el.dataset.key);
+          UI.toast('已删除');
+          await load();
+          const cur = posts.find(x => String(x.id) === String(p.id));
+          if (cur) renderDetail(cur); else backFromDetail();
+        } catch (e) { UI.toast('删除失败：' + e.message); }
+      });
+    });
+  }
+  async function openPostDetail(id) {
+    try { await load(); } catch (e) {}
+    const p = posts.find(x => String(x.id) === String(id));
+    if (!p) { UI.toast('找不到这条动态（可能已删除）'); const h = App.consumeBack(); if (h) h(); else App.showTab('moments'); return; }
+    App.showPage('page-moment-detail', () => renderDetail(p));
+  }
+  function backFromDetail() {
+    const h = App.consumeBack();
+    if (h) h(); else App.showTab('moments');
   }
 
   /* ---- 发布弹层 ---- */
@@ -331,10 +423,11 @@ const Moments = (() => {
         const rel = rels.find(r => r.key === App.charKey(c));
         const r = await API.aiComment({ momentId: post.id, character: App.charKey(c), characterName: App.displayName(c), momentText: post.text || '', posterName: post.character || '', relation: rel ? (rel.relation || '') : '' });
         if (r && r.text) {
-          await API.addComment({ momentId: post.id, character: App.charKey(c), characterName: App.displayName(c), text: r.text });
+          const text = commentText(r.text); // 剥离可能的存储标记前缀 + 括号清洗
+          await API.addComment({ momentId: post.id, character: App.charKey(c), characterName: App.displayName(c), text });
           okCount++;
           // 本地数据 + 局部渲染：一条一条带随机间隔弹出（仿聊天逐条）
-          const cm = { character: App.displayName(c), text: r.text, time: new Date().toISOString(), key: App.charKey(c) };
+          const cm = { character: App.displayName(c), text, time: new Date().toISOString(), key: App.charKey(c) };
           (post.comments = post.comments || []).push(cm);
           appendCommentEl(post.id, cm);
           await sleep(900 + Math.random() * 1100);
@@ -356,7 +449,7 @@ const Moments = (() => {
     if (!cbox) return;
     const el = document.createElement('div');
     el.className = 'comment-item';
-    el.innerHTML = `<span class="cname">${UI.esc(cm.character)}</span>：${UI.esc(window.stripActions ? window.stripActions(cm.text) : cm.text)}<span class="comment-del" data-time="${UI.esc(cm.time)}" data-key="${UI.esc(cm.key || '')}">✕</span>`;
+    el.innerHTML = `<span class="cname">${UI.esc(cm.character)}</span>：${UI.esc(commentText(cm.text))}<span class="comment-del" data-time="${UI.esc(cm.time)}" data-key="${UI.esc(cm.key || '')}">✕</span>`;
     cbox.appendChild(el);
     const del = el.querySelector('.comment-del');
     del.addEventListener('click', async (ev) => {
@@ -416,7 +509,10 @@ const Moments = (() => {
     const c = App.charByKey(key);
     if (!c) { document.getElementById('share-tip').textContent = '角色不存在'; return; }
     const note = document.getElementById('share-note').value.trim();
-    const shareText = (note ? note + '\n' : '') + '分享给你看看：\n' + sharePayloadText;
+    // 分享者身份：让 AI 明确是「当前玩家」转发的，避免把分享者误认成朋友圈发布者
+    let meName = '我';
+    try { const p = (typeof Me !== 'undefined') ? Me.activePlayer() : null; if (p && p.name) meName = p.name; } catch (e) {}
+    const shareText = (note ? note + '\n' : '') + '我（' + meName + '）分享给你看：\n' + sharePayloadText;
     const tip = document.getElementById('share-tip');
     tip.textContent = '正在打开 ' + App.displayName(c) + ' 的聊天…';
     tip.className = 'modal-tip loading';
@@ -489,10 +585,17 @@ const Moments = (() => {
     tip.textContent = '发送中…';
     tip.className = 'modal-tip loading';
     try {
-      await API.addComment({ momentId: commentTarget.id, character, characterName, text });
+      await API.addComment({ momentId: commentTarget.id, character, characterName, text: commentText(text) });
       closeCommentModal();
       await load();
-      render();
+      // 单条详情页可见时刷新详情，否则刷新列表
+      const det = document.getElementById('page-moment-detail');
+      if (det && det.style.display !== 'none' && detailPost) {
+        const cur = posts.find(x => String(x.id) === String(detailPost.id));
+        if (cur) renderDetail(cur); else backFromDetail();
+      } else {
+        render();
+      }
     } catch (e) {
       tip.textContent = '失败：' + e.message;
       tip.className = 'modal-tip';
@@ -521,7 +624,7 @@ const Moments = (() => {
     tip.className = 'modal-tip loading';
     try {
       const r = await API.aiComment({ momentId: commentTarget.id, character, characterName, momentText: commentTarget.text, isMe: who === 'me' });
-      document.getElementById('comment-text').value = r.text ? (window.stripActions ? window.stripActions(r.text) : r.text) : '';
+      document.getElementById('comment-text').value = r.text ? commentText(r.text) : '';
       tip.textContent = '已生成，点「发送」确认';
       tip.className = 'modal-tip';
     } catch (e) {
@@ -711,7 +814,9 @@ const Moments = (() => {
     document.getElementById('ai-moment-modal').addEventListener('click', e => {
       if (e.target.id === 'ai-moment-modal') closeAiMomentModal();
     });
+    const detBack = document.getElementById('btn-moment-detail-back');
+    if (detBack) detBack.addEventListener('click', backFromDetail);
   }
 
-  return { render, load, init, openFor, openPostById, shareToChat };
+  return { render, load, init, openFor, openPostById, openPostDetail, shareToChat };
 })();
