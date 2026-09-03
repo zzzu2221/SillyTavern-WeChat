@@ -419,12 +419,18 @@ const GroupChat = (() => {
         if (!out || !out.length) break; // 这轮没有产出就停下，避免空转
         for (const o of out) {
           await sleep(500 + Math.random() * 1000);
+          // AI 试图以玩家身份发言（玩家名 / 「玩家」 / 「我」）→ 直接跳过，玩家由本人说话
+          const p0 = meInfo();
+          if (o.key === p0.name || o.key === '玩家' || o.key === '我') continue;
           // AI 输出的「角色=名字」是微信备注名，映射回角色 key
           let key = null;
           const member = members.find(x => x.name === o.key);
           if (member) key = member.key;
           else if (App.charByKey(o.key)) key = o.key;
-          if (!key) key = activeMembers[0].key;
+          // 兜底也避开玩家（玩家不会由 AI 代发言，否则会把 AI 的话错存成「我」）
+          if (!key) { const fb = activeMembers.find(m => String(m.key || '').indexOf('__me__') !== 0); key = (fb && fb.key) || null; }
+          // 玩家由本人说话：AI 若跑偏输出玩家名，跳过不写入
+          if (!key || String(key || '').indexOf('__me__') === 0) continue;
           // 写入前兜底：若该成员此刻已被禁言（AI 可能选错），跳过这条
           if (muted[key] && muted[key] > Date.now()) continue;
           const c = App.charByKey(key);
@@ -667,11 +673,17 @@ const GroupChat = (() => {
         const writeOut = async (list) => {
           for (const o of (list || [])) {
             await sleep(500 + Math.random() * 1000);
+            // AI 试图以玩家身份发言（玩家名 / 「玩家」 / 「我」）→ 直接跳过，玩家由本人说话
+            const p0 = meInfo();
+            if (o.key === p0.name || o.key === '玩家' || o.key === '我') continue;
             let key = null;
             const member = members.find(x => x.name === o.key);
             if (member) key = member.key;
             else if (App.charByKey(o.key)) key = o.key;
-            if (!key) key = activeMembers[0].key;
+            // 兜底避开玩家（玩家不会由 AI 代发言）
+            if (!key) { const fb = activeMembers.find(m => String(m.key || '').indexOf('__me__') !== 0); key = (fb && fb.key) || null; }
+            // 玩家由本人说话：AI 跑偏输出玩家名则跳过
+            if (!key || String(key || '').indexOf('__me__') === 0) continue;
             // 写入前兜底：该成员此刻已被禁言则跳过
             if (muted[key] && muted[key] > Date.now()) continue;
             await API.saveWeChatMessage(groupName, { name: charDisplayName(key, o.key), key, text: o.text });
