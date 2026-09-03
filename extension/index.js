@@ -18,7 +18,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
   var IMG_PROMPT_RULES = [
     '1. 只写画面描述英文关键词（纯英文短标签，单行不换行），绝对不要添加画质、画风类词汇（如 masterpiece, best quality, anime style, illustration, highly detailed 等），这些由插件全局预设自动加载。',
     '2. 关键词排序顺序固定：角色英文名称 → 年龄性别 → 发型样貌 → 穿戴细节 → 神态表情 → 身体动作 → 手部细节 → 所处环境 → 光影氛围 → 次要物品 → 画面约束。',
-    '3. 角色必须有固定人设锚点：先写该角色在《咒术回战》等原作中的英文名（如 五条悟 = gojou satoru, adult male），再写标志性外貌（如 五条悟：white short messy hair, round sunglasses slipping down the tip of nose 或 blindfold on eyes；夏油杰：geto suguru, adult male, long black half-up bun hair, black ear gauges），服饰神态动作严格贴合当前剧情。',
+    '3. 角色必须有固定人设锚点：先写该角色在其出处原作/设定中的英文名或罗马音（从角色卡描述中提取，例如五条悟=gojou satoru，其他世界观角色同理），再写标志性外貌（同样从角色卡描述中提取：发型、瞳色、特征服饰、面饰等），服饰神态动作严格贴合当前剧情。',
     '4. 仅还原本轮剧情关键画面，不脑补、不带过往剧情。',
     '5. 多人群像只细化 1~2 个主要角色，配角极简站位。',
     '6. 全程规避畸形肢体、错误构图。',
@@ -144,7 +144,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       })(chars[i]);
     }
     await Promise.all(tasks);
-    // 同名角色加区分后缀，用于展示（如：五条悟、五条悟 #2）
+    // 同名角色加区分后缀，用于展示（如：角色名、角色名 #2）
     var nameCount = {};
     out.forEach(function (c) { nameCount[c.name] = (nameCount[c.name] || 0) + 1; });
     var seen = {};
@@ -939,7 +939,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
   /** AI 生成公众号文章：营销号/技术号/探店号小编口吻，发布人由 AI 拟；不硬扯角色 */
   async function genArticle(args) {
     args = args || {};
-    // 世界观素材：玩家账号的世界书/人设（提供新宿、涩谷、五条家等地名与背景知识）
+    // 世界观素材：玩家账号的世界书/人设（提供世界观背景、地名、组织与热门话题）
     var meWorld = '';
     try { meWorld = args.meDesc || ''; } catch (e) {}
     var prompt = [
@@ -949,11 +949,11 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       meWorld ? '- 世界观背景（用于了解世界的地名/组织/热门话题，不要照抄）：' + String(meWorld).slice(0, 1000) : '',
       '写作要求：',
       '1) 主题如果是探店、攻略、生活方式、美食、旅游、科技、日常技巧这类：就写成正经的探店/攻略/资讯内容，聚焦地点、店铺、体验、口味、价格、实用信息等，内容要有干货。绝对不要把内容硬往某个角色身上扯；除非该主题本身就是世界观里的热点新闻。',
-      '2) 主题如果是世界观相关的热点新闻（例如"五条家新任最强家主"这种）：以小编报道的视角写，可用旁观者口吻提及相关角色/事件，但绝不站在任何角色第一人称口吻，不代入角色情绪。',
+      '2) 主题如果是世界观相关的热点新闻（例如"某家族新任家主上位""某组织重大事件"这类）：以小编报道的视角写，可用旁观者口吻提及相关角色/事件，但绝不站在任何角色第一人称口吻，不代入角色情绪。',
       '3) 标题要吸引眼球（如《震惊！…》《…深度解析》《…不为人知的秘密》《…探店指南》《…避雷》等），正文 200~400 字左右，自然分段。',
       '4) 绝对不要用任何 Markdown 标记（如 #、*、-），不要写括号动作/表情/心理描写，纯文字内容。',
-      '5) 拟一个贴合题材/世界观的公众号名称（如「东京甜品生存指南」「新宿探店手册」「高专百晓生」，不要用角色名当公众号名）。',
-      '6) 视角分层（非常重要）：这个世界存在「普通公众」和「知晓内情者」两类人。普通公众完全不知道咒术师、咒力、术式、诅咒、咒灵等超自然存在的存在。默认按普通公众视角写作：探店、攻略、生活、美食、旅游类内容，绝对不透露任何超自然设定——不要出现"咒力""术式""咒术师""无咒力""诅咒"等词，最多用"这家店据说有点玄乎"这类都市传说式的调侃。只有当主题本身明确是咒术师/高专/诅咒等内行话题（例如"五条家新任最强家主"）时，才以知情的小编报道视角写作，且仍用旁观者口吻、不代入任何角色。',
+      '5) 拟一个贴合题材/世界观设定的公众号名称（如「XX探店手册」「XX生存指南」「XX观察」这类，不要用角色名当公众号名）。',
+      '6) 视角分层（非常重要）：这个世界存在「普通公众」和「知晓内情者」两类人。普通公众对这个世界隐藏的隐秘设定（超能力/魔法/灵异/咒力等，以提供给你的世界观背景为准）一无所知。默认按普通公众视角写作：探店、攻略、生活、美食、旅游、科技类内容，绝对不透露任何隐秘设定，也不要出现相关专有名词，最多用"这家店据说有点玄乎"这类都市传说式的调侃。只有当主题本身明确是内行话题（如该世界观的重要热点事件/组织新闻）时，才以知情的小编报道视角写作，且仍用旁观者口吻、不代入任何角色。',
       '只输出 JSON：{"author":"公众号名称","title":"标题（10~20字，吸引人）","body":"正文（纯文字，自然分段）"}',
     ].filter(Boolean).join('\n');
     var reply = await genChat([
@@ -1456,7 +1456,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
                 '<label>用哪个预设 <select id="wxst-img-preset-sel"><option value="">默认</option></select></label>' +
                 '<button class="wxst-mini-btn wxst-import-zh" id="wxst-import-zh" type="button">↺ 一键导入智绘机预设与参数</button>' +
               '</div>' +
-              '<div class="wxst-set-tip">导入后在上面下拉里选预设（如「漫画风」「咒回」）即可发朋友圈用。想微调再展开「自定义生图」。</div>' +
+              '<div class="wxst-set-tip">导入后在上面下拉里选预设（如「漫画风」「写实」）即可发朋友圈用。想微调再展开「自定义生图」。</div>' +
               '<details class="wxst-set-adv"><summary class="wxst-set-title">自定义生图（进阶，平时不用动）</summary>' +
                 '<label>生图方式 <select id="wxst-img-mode">' +
                   '<option value="proxy"' + (imCfg.mode === 'direct' ? '' : ' selected') + '>走酒馆代理（用酒馆/智绘机的 key）</option>' +
@@ -1953,7 +1953,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       }
     });
     (chars || []).forEach(function (x) { if (!keyByName[x.name]) keyByName[x.name] = charKeyOf(x); });
-    // 别名：角色名最后一个字（≥3 字时）也映射到同一 key，兼容 AI 用「杰」指代「夏油杰」
+    // 别名：角色名最后一个字（≥3 字时）也映射到同一 key，兼容 AI 用简称/尾字指代角色
     Object.keys(keyByName).forEach(function (nm) {
       if (!nm || nm.length < 3) return;
       var last = nm.slice(-1);
@@ -2047,7 +2047,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
   function cleanGroupText(s) {
     var t = String(s || '').trim();
     t = t.replace(/^角色=[^;]*;\s*内容=/, '');
-    // 兼容模型跑偏前缀「硝子=家入硝子;内容=」这类残留
+    // 兼容模型跑偏前缀「角色=角色名;内容=」这类残留
     t = t.replace(/^[^=;，。]{1,10}=[^;=]{0,20}\s*;?\s*内容\s*=\s*/, '');
     // 全局清除残留在任意位置的「角色=xxx」标记片段
     t = t.replace(/(^|[，。；、\s])(角色\s*=\s*[^;，。；、\s]{1,12})\s*/g, '$1');
