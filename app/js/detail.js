@@ -26,9 +26,62 @@ const Detail = (() => {
   }
 
   /** 角色间关系：settings.charRelations[keyA][keyB] = 关系（'陌生人'= 朋友圈不互评；未设置默认互通；支持自定义关系词） */
-  const RELATIONS = ['认识', '陌生人', '情侣', '恋人', '好友', '兄弟', '姐妹', '家人', '死对头', '师生', '同事', '其他', '自定义…'];
+  const RELATIONS = ['认识', '陌生人', '情侣', '好友', '师生', '同事', '自定义…'];
   function relationsAll() {
     try { return (API.getSettings() || {}).charRelations || {}; } catch (e) { return {}; }
+  }
+  /** 已保存的自定义关系词（全局共享，导出时随账号备份带上；输入过一次后下次可直接选） */
+  function customRelations() {
+    try { return (API.getSettings() || {}).customRelations || []; } catch (e) { return []; }
+  }
+  function addCustomRelation(word) {
+    if (!word) return;
+    const list = customRelations();
+    if (list.indexOf(word) >= 0) return;
+    list.push(word);
+    API.saveAppSettings({ customRelations: list });
+    if (App.state.config) App.state.config.customRelations = list;
+  }
+  /** 批量添加自定义关系词（逗号/空格/换行分隔），返回新增数量 */
+  function addCustomRelations(text) {
+    const words = String(text || '').split(/[,，\s\n]+/).map(s => s.trim()).filter(Boolean);
+    const list = customRelations();
+    let added = 0;
+    words.forEach(w => { if (list.indexOf(w) < 0) { list.push(w); added++; } });
+    if (added) {
+      API.saveAppSettings({ customRelations: list });
+      if (App.state.config) App.state.config.customRelations = list;
+    }
+    return added;
+  }
+  /** 重命名自定义关系词：同步更新 charRelations 里所有引用（角色间关系全局通用） */
+  function renameCustomRelation(oldWord, newWord) {
+    if (!oldWord || !newWord || oldWord === newWord) return;
+    const list = customRelations();
+    const idx = list.indexOf(oldWord);
+    if (idx < 0) return;
+    if (list.indexOf(newWord) >= 0) { UI.toast('已存在同名关系词'); return; }
+    list[idx] = newWord;
+    API.saveAppSettings({ customRelations: list });
+    if (App.state.config) App.state.config.customRelations = list;
+    // 同步更新所有角色对里已使用该词的关系
+    const all = relationsAll();
+    let changed = false;
+    Object.keys(all).forEach(k1 => {
+      Object.keys(all[k1]).forEach(k2 => {
+        if (all[k1][k2] === oldWord) { all[k1][k2] = newWord; changed = true; }
+      });
+    });
+    if (changed) {
+      API.saveAppSettings({ charRelations: all });
+      if (App.state.config) App.state.config.charRelations = all;
+    }
+  }
+  /** 从词库删除自定义关系词（已使用该关系的角色对保留原值，不强制清除） */
+  function removeCustomRelation(word) {
+    const list = customRelations().filter(w => w !== word);
+    API.saveAppSettings({ customRelations: list });
+    if (App.state.config) App.state.config.customRelations = list;
   }
   function relationBetween(keyA, keyB) {
     const all = relationsAll();
@@ -304,29 +357,95 @@ const Detail = (() => {
       return n ? `已设置 ${n} 个关系` : '管理与其他角色';
     } catch (e) { return '管理与其他角色'; }
   }
+  /** 自定义关系词批量管理弹窗：批量添加、重命名、删除 */
+  function customRelationsManager() {
+    const mask = document.createElement('div');
+    mask.className = 'wx-confirm-mask';
+    const render = () => {
+      const list = customRelations();
+      mask.innerHTML = `
+        <div class="wx-confirm" style="max-width:420px;width:88vw">
+          <div class="wx-confirm-title">自定义关系词管理</div>
+          <div style="font-size:12px;color:#999;margin-bottom:8px;line-height:1.5">
+            这里的词会出现在所有角色的关系下拉里；角色间关系全局通用，所有账号共享，设置一次即可，要改直接改。
+          </div>
+          <div style="display:flex;gap:6px;margin-bottom:10px">
+            <input id="rels-custom-batch" class="wx-confirm-input" placeholder="批量添加：逗号/空格/换行分隔，如 前辈,宿敌,青梅竹马" style="flex:1">
+            <button type="button" class="wx-confirm-btn" id="rels-custom-add" style="background:#07c160;color:#fff;white-space:nowrap;padding:0 14px">添加</button>
+          </div>
+          <div style="max-height:45vh;overflow-y:auto;border:1px solid #eee;border-radius:6px">
+            ${list.length ? list.map(w => `
+              <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #f5f5f5">
+                <span style="flex:1;font-size:14px">${UI.esc(w)}</span>
+                <button type="button" class="wx-confirm-btn rels-custom-rename" data-w="${UI.esc(w)}" style="padding:4px 10px;font-size:12px">重命名</button>
+                <button type="button" class="wx-confirm-btn rels-custom-del" data-w="${UI.esc(w)}" style="padding:4px 10px;font-size:12px;color:#e74c3c">删除</button>
+              </div>`).join('') : '<div style="padding:20px;text-align:center;color:#999;font-size:13px">暂无自定义关系词</div>'}
+          </div>
+          <div class="wx-confirm-btns">
+            <button class="wx-confirm-btn wx-confirm-cancel" type="button">关闭</button>
+          </div>
+        </div>`;
+      mask.querySelector('#rels-custom-add').addEventListener('click', () => {
+        const input = mask.querySelector('#rels-custom-batch');
+        const n = addCustomRelations(input.value);
+        UI.toast(n ? ('已添加 ' + n + ' 个') : '没有新词');
+        render();
+      });
+      mask.querySelectorAll('.rels-custom-rename').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const oldW = btn.dataset.w;
+          const newW = await editPrompt('重命名关系词（已使用该关系的角色对会同步更新）', oldW);
+          if (newW == null || newW === oldW) return;
+          renameCustomRelation(oldW, newW.trim());
+          UI.toast('已重命名');
+          render();
+        });
+      });
+      mask.querySelectorAll('.rels-custom-del').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const w = btn.dataset.w;
+          const ok = await UI.confirm('从词库删除「' + w + '」？\n已使用该关系的角色对会保留原关系，只是下拉里不再出现这个词。', { okText: '删除' });
+          if (!ok) return;
+          removeCustomRelation(w);
+          UI.toast('已删除');
+          render();
+        });
+      });
+      mask.querySelector('.wx-confirm-cancel').addEventListener('click', () => mask.remove());
+      mask.addEventListener('click', e => { if (e.target === mask) mask.remove(); });
+    };
+    render();
+    document.body.appendChild(mask);
+  }
+
   function openRelationModal(c) {
     const myKey = App.charKey(c);
     const others = App.state.characters.filter(x => App.charKey(x) !== myKey);
     const PRESET = RELATIONS.filter(r => r !== '自定义…');
+    const savedCustom = customRelations();
+    const allOpts = PRESET.concat(savedCustom); // 预设 + 已保存的自定义词，最后再附「自定义…」输入新的
     const mask = document.createElement('div');
     mask.className = 'wx-confirm-mask';
     mask.innerHTML = `
       <div class="wx-confirm" style="max-width:420px;width:88vw">
-        <div class="wx-confirm-title">「${UI.esc(shownName(c))}」与其他角色的关系</div>
-        <div style="font-size:12px;color:#999;margin-bottom:8px;line-height:1.5">「陌生人」= 朋友圈里互不评论；其他关系用于让 AI 把握互动；选「自定义…」可输入专属称呼（如「前辈」）。未设置的默认互通。</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+          <div class="wx-confirm-title" style="margin:0">「${UI.esc(shownName(c))}」与其他角色的关系</div>
+          <button type="button" class="wx-confirm-btn" id="rels-open-manager" style="padding:4px 10px;font-size:12px;background:#fff;color:#07c160;border:1px solid #07c160;white-space:nowrap">管理词库</button>
+        </div>
+        <div style="font-size:12px;color:#999;margin-bottom:8px;line-height:1.5">角色间关系全局通用，所有账号共享，设置一次即可；「陌生人」= 朋友圈里互不评论；选「自定义…」输入的词会被记住，也可点「管理词库」批量增删改。未设置的默认互通。</div>
         <div class="acct-rel-list rels-list" style="max-height:55vh;overflow-y:auto">
           ${others.length ? others.map(x => {
             const rel = relationBetween(myKey, App.charKey(x));
-            const known = !!rel && PRESET.indexOf(rel) >= 0;
+            const known = !!rel && allOpts.indexOf(rel) >= 0;
             const selVal = rel ? (known ? rel : '__custom__') : '认识';
             const customWord = rel && !known ? rel : '';
             return `<div class="acct-rel">
               <div class="acct-rel-head">
                 <div class="avatar">${UI.avatarSrc(x.avatar) ? `<img src="${UI.esc(UI.avatarSrc(x.avatar))}">` : ''}</div>
                 <div class="acct-rel-name">${UI.esc(shownName(x))}</div>
-                <select class="acct-rel-type" data-k="${UI.esc(App.charKey(x))}" data-custom="${UI.esc(customWord)}">${PRESET.map(r => `<option value="${r}"${r === selVal ? ' selected' : ''}>${r}</option>`).join('')}<option value="__custom__"${selVal === '__custom__' ? ' selected' : ''}>自定义…</option></select>
+                <select class="acct-rel-type" data-k="${UI.esc(App.charKey(x))}" data-custom="${UI.esc(customWord)}">${allOpts.map(r => `<option value="${r}"${r === selVal ? ' selected' : ''}>${r}</option>`).join('')}<option value="__custom__"${selVal === '__custom__' ? ' selected' : ''}>自定义…</option></select>
               </div>
-              <div class="acct-rel-sub"><input class="acct-rel-custom" data-k="${UI.esc(App.charKey(x))}" placeholder="自定义关系词（选「自定义…」时填写）" value="${UI.esc(customWord)}" style="display:${selVal === '__custom__' ? 'block' : 'none'};width:100%;box-sizing:border-box"></div>
+              <div class="acct-rel-sub"><input class="acct-rel-custom" data-k="${UI.esc(App.charKey(x))}" placeholder="自定义关系词（选「自定义…」时填写，填过一次后会记住）" value="${UI.esc(customWord)}" style="display:${selVal === '__custom__' ? 'block' : 'none'};width:100%;box-sizing:border-box"></div>
             </div>`;
           }).join('') : '<div class="acct-rel-empty">暂无其他角色</div>'}
         </div>
@@ -342,6 +461,9 @@ const Detail = (() => {
         if (sub) sub.style.display = sel.value === '__custom__' ? 'block' : 'none';
       });
     });
+    // 打开自定义关系词批量管理
+    const mgrBtn = mask.querySelector('#rels-open-manager');
+    if (mgrBtn) mgrBtn.addEventListener('click', () => customRelationsManager());
     const ok = mask.querySelector('.wx-confirm-ok');
     const cancel = mask.querySelector('.wx-confirm-cancel');
     const done = saved => { mask.remove(); if (saved) { render(); UI.toast('已保存角色关系'); } };
@@ -350,7 +472,9 @@ const Detail = (() => {
       mask.querySelectorAll('.acct-rel-type').forEach(sel => {
         if (sel.value === '__custom__') {
           const sub = mask.querySelector('.acct-rel-custom[data-k="' + sel.dataset.k + '"]');
-          map[sel.dataset.k] = (sub && sub.value.trim()) || '认识';
+          const word = (sub && sub.value.trim()) || '认识';
+          map[sel.dataset.k] = word;
+          if (word && word !== '认识') addCustomRelation(word); // 新词加入可选项，下次直接选
         } else {
           map[sel.dataset.k] = sel.value;
         }

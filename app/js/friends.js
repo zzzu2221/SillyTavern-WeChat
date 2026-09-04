@@ -18,14 +18,14 @@ const Friends = (() => {
 
   async function saveWhitelist(list) {
     const uniq = Array.from(new Set(list.map(String).filter(Boolean)));
-    await API.saveAppSettings({ whitelist: uniq });
+    await API.saveWhitelistState({ whitelist: uniq });
     // 更新本地缓存
     if (App.state.config) App.state.config.whitelist = uniq;
     await App.refreshCharacters();
   }
   async function saveExcluded(list) {
     const uniq = Array.from(new Set(list.map(String).filter(Boolean)));
-    await API.saveAppSettings({ whitelistExcluded: uniq });
+    await API.saveWhitelistState({ whitelistExcluded: uniq });
     if (App.state.config) App.state.config.whitelistExcluded = uniq;
     await App.refreshCharacters();
   }
@@ -39,9 +39,7 @@ const Friends = (() => {
   function render() {
     const body = document.getElementById('friends-body');
     const chars = App.state.allCharacters || [];
-    const wl = whitelist();
     const eff = effectiveKeys();
-    const autoTag = (App.state.config && App.state.config.autoWhitelistTag) || '';
     if (!chars.length) {
       body.innerHTML = `<div class="empty"><div class="big">👥</div>暂无角色卡<br><br>请确认酒馆已启动并已导入角色</div>`;
       return;
@@ -61,12 +59,10 @@ const Friends = (() => {
       const avatar = UI.avatarSrc(c.avatar) ? `<img src="${UI.esc(UI.avatarSrc(c.avatar))}">` : '';
       const key = App.charKey(c);
       const tagsHtml = (c.tag || []).map(t => `<span class="rp-tag">${UI.esc(t)}</span>`).join('');
-      const isAuto = autoTag && (c.tag || []).indexOf(autoTag) >= 0 && wl.indexOf(key) < 0;
-      const autoBadge = isAuto ? '<span class="friend-auto">tag 自动</span>' : '';
       const btns = opts.btn || '';
       return `<div class="friend-item" data-key="${UI.esc(key)}">
         <div class="avatar">${avatar}</div>
-        <div class="friend-main"><div class="friend-name">${UI.esc(App.displayName(c))}${autoBadge}</div><div class="friend-tags">${tagsHtml || ''}</div></div>
+        <div class="friend-main"><div class="friend-name">${UI.esc(App.displayName(c))}</div><div class="friend-tags">${tagsHtml || ''}</div></div>
         <div class="friend-actions">${btns}</div>
       </div>`;
     }
@@ -86,7 +82,7 @@ const Friends = (() => {
         </select>
       </div>` : '';
     body.innerHTML = tagBar + `
-      <div class="friend-hint">点「同意」把角色加入通讯录（也才能发朋友圈）；「移除」则从通讯录删掉。可在酒馆角色管理给角色打 tag 后按分组筛选。${autoTag ? `当前设置：打「${UI.esc(autoTag)}」tag 的角色自动加入通讯录（可移除，移除后不会再自动出现，除非重新同意）。` : ''}</div>
+      <div class="friend-hint">点「同意」把角色加入通讯录（也才能发朋友圈）；「移除」则从通讯录删掉。可在酒馆角色管理给角色打 tag 后按分组筛选。</div>
       <div class="friend-group">${added.length ? `<div class="friend-group-title">已加入（${added.length}）</div><div class="friend-list">${addedHtml}</div>` : ''}</div>
       <div class="friend-group">${pending.length ? `<div class="friend-group-title">新朋友（${pending.length}）</div><div class="friend-list">${pendingHtml}</div>` : '<div class="empty small">没有待添加的角色卡了</div>'}</div>
     `;

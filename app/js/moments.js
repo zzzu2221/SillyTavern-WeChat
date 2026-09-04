@@ -4,7 +4,38 @@ const Moments = (() => {
   let busy = false;
   let filterKey = null; // 非空时只显示该角色发的动态（从角色详情页进来）
 
+  /* ---- 朋友圈未读小红点：AI 主动发圈/评论后 +1，用户进入朋友圈清零（按账号隔离） ---- */
+  function unreadKey() {
+    try {
+      const s = API.getSettings() || {};
+      const pid = s.activePlayerId || 'me';
+      return 'wx_moments_unread_' + pid;
+    } catch (e) { return 'wx_moments_unread_me'; }
+  }
+  function getUnread() { try { return Number(localStorage.getItem(unreadKey()) || 0) || 0; } catch (e) { return 0; } }
+  function incUnread(n) {
+    try { localStorage.setItem(unreadKey(), String(getUnread() + (n || 1))); } catch (e) {}
+    refreshTabBadge();
+  }
+  function clearUnread() {
+    try { localStorage.removeItem(unreadKey()); } catch (e) {}
+    refreshTabBadge();
+  }
+  function refreshTabBadge() {
+    try {
+      const tab = document.querySelector('[data-tab="moments"]');
+      if (!tab) return;
+      const n = getUnread();
+      let b = tab.querySelector('.tab-badge');
+      if (n > 0) {
+        if (!b) { b = document.createElement('span'); b.className = 'tab-badge'; tab.appendChild(b); }
+        b.textContent = n > 99 ? '99+' : n;
+      } else if (b) b.remove();
+    } catch (e) {}
+  }
+
   async function load() {
+    clearUnread(); // 用户进入朋友圈 → 清零未读红点
     const data = await API.getMoments();
     posts = (data && data.posts) || [];
     return posts;
@@ -467,10 +498,11 @@ const Moments = (() => {
     const n = minN + Math.floor(Math.random() * (maxN - minN + 1));
     const player = (typeof Me !== 'undefined') ? Me.activePlayer() : null;
     const rels = (player && Array.isArray(player.relations)) ? player.relations : [];
-    // 关联角色优先（排除发布者自己 + 陌生人）
+    // 关联角色优先（排除发布者自己 + 陌生人；且必须在当前账号通讯录白名单里，杜绝通讯录外角色冒泡评论）
+    const wlSet = new Set((App.state.characters || []).map(x => App.charKey(x)));
     const relCandidates = rels
       .map(r => r.key ? App.charByKey(r.key) : null)
-      .filter(c => c && App.charKey(c) !== post.key && shownName(c).trim() !== String(post.character || '').trim() && !isStrangerTo(post.key, App.charKey(c)));
+      .filter(c => c && wlSet.has(App.charKey(c)) && App.charKey(c) !== post.key && shownName(c).trim() !== String(post.character || '').trim() && !isStrangerTo(post.key, App.charKey(c)));
     const others = commentableChars(post);
     const pool = relCandidates.length ? relCandidates : others;
     if (!pool.length) return;
@@ -979,5 +1011,5 @@ const Moments = (() => {
     if (detBack) detBack.addEventListener('click', backFromDetail);
   }
 
-  return { render, load, init, openFor, openPostById, openPostDetail, shareToChat, recentChatOf, autoCommentMoment };
+  return { render, load, init, openFor, openPostById, openPostDetail, shareToChat, recentChatOf, autoCommentMoment, incUnread, getUnread, refreshTabBadge };
 })();

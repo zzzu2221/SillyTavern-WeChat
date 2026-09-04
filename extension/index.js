@@ -182,32 +182,77 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       })(chars[i]);
     }
     await Promise.all(tasks);
-    // 同名角色加区分后缀，用于展示（如：角色名、角色名 #2）
-    var nameCount = {};
-    out.forEach(function (c) { nameCount[c.name] = (nameCount[c.name] || 0) + 1; });
-    var seen = {};
-    out.forEach(function (c) {
-      if (nameCount[c.name] > 1) {
-        seen[c.name] = (seen[c.name] || 0) + 1;
-        c.displayName = c.name + (seen[c.name] > 1 ? ' #' + seen[c.name] : '');
-      } else {
-        c.displayName = c.name;
-      }
-    });
+    // 显示名直接用角色原名，不再给同名角色加「 #2」后缀；
+    // 重名区分靠唯一 key（avatar 文件名）或用户在「角色详情 → 设置备注」里的微信备注，避免用户挨个手动改备注。
+    out.forEach(function (c) { c.displayName = c.name; });
     charCache = { at: now, list: out };
     return out;
   }
 
-  function whitelistOf() {
+  /* ---------------- 账号作用域（切号系统）：白名单 / 会话 / 朋友圈 / 公众号 全部按账号隔离 ---------------- */
+  /** 当前账号 id：activePlayerId，无则取 players[0]，再兜底 'me' */
+  function currentPlayerId() {
     var s = getSettings();
-    if (!Array.isArray(s.whitelist)) return null; // null = 全部
-    return s.whitelist.map(String);
+    var id = s.activePlayerId;
+    if (!id) {
+      var list = Array.isArray(s.players) ? s.players : [];
+      id = (list[0] && list[0].id) || 'me';
+    }
+    return id;
   }
-  /** 白名单判定：key 优先，兼容旧版本按 name 存的 whitelist */
+  /** 某账号的白名单存储对象（初始化空结构，不主动落盘）：
+      { whitelist: [key]|null(null=全部), whitelistExcluded: [key], autoWhitelistTag: ''(一次性用,不持久) } */
+  function whitelistStoreOf(pid) {
+    var s = getSettings();
+    pid = pid || currentPlayerId();
+    var isNew = false;
+    if (!s.whitelistByPlayer || typeof s.whitelistByPlayer !== 'object') { s.whitelistByPlayer = {}; isNew = true; }
+    if (!s.whitelistByPlayer[pid] || typeof s.whitelistByPlayer[pid] !== 'object') { s.whitelistByPlayer[pid] = {}; isNew = true; }
+    var st = s.whitelistByPlayer[pid];
+    // 一次性迁移：首次访问该账号且仍存在旧全局字段 → 搬到当前账号（保证不闪变、不丢数据）
+    if (isNew && (s.whitelist !== undefined || s.whitelistExcluded !== undefined || s.autoWhitelistTag !== undefined)) {
+      if (s.whitelist !== undefined) st.whitelist = Array.isArray(s.whitelist) ? s.whitelist.map(String) : null;
+      if (Array.isArray(s.whitelistExcluded)) st.whitelistExcluded = s.whitelistExcluded.map(String);
+      if (s.autoWhitelistTag !== undefined) st.autoWhitelistTag = String(s.autoWhitelistTag);
+    }
+    if (!('whitelist' in st)) st.whitelist = []; // 新账号默认空通讯录（切号系统：新账号不继承任何角色）
+    if (!Array.isArray(st.whitelistExcluded)) st.whitelistExcluded = [];
+    return st;
+  }
+  /** 某账号的白名单数组（null = 全部）；默认当前账号 */
+  function whitelistOf(pid) {
+    var st = whitelistStoreOf(pid);
+    if (!Array.isArray(st.whitelist)) return null;
+    return st.whitelist.map(String);
+  }
+  /** 白名单判定（按当前账号）：key 优先，兼容旧版本按 name 存的 whitelist */
   function isAllowed(key, name) {
     var w = whitelistOf();
     if (!w) return true;
     return w.indexOf(String(key)) >= 0 || (name != null && w.indexOf(String(name)) >= 0);
+  }
+  /** 把角色 key 加入当前账号白名单（幂等）；返回新白名单数组 */
+  function addToWhitelist(keys) {
+    var st = whitelistStoreOf();
+    var wl = Array.isArray(st.whitelist) ? st.whitelist.map(String) : [];
+    (keys || []).forEach(function (k) {
+      k = String(k || '');
+      if (k && wl.indexOf(k) < 0) wl.push(k);
+    });
+    st.whitelist = wl;
+    saveSettings();
+    charCache = null;
+    return wl;
+  }
+  /** 保存当前账号白名单状态（前端「新朋友」页同意/移除用）：patch = { whitelist?: [key], whitelistExcluded?: [key] } */
+  function saveWhitelistState(patch) {
+    patch = patch || {};
+    var st = whitelistStoreOf();
+    if (Array.isArray(patch.whitelist)) st.whitelist = patch.whitelist.map(String);
+    if (Array.isArray(patch.whitelistExcluded)) st.whitelistExcluded = patch.whitelistExcluded.map(String);
+    saveSettings();
+    charCache = null;
+    return true;
   }
 
   /* ---------------- 聊天配置 ---------------- */
@@ -583,28 +628,44 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
   }
 
   /* ---------------- 朋友圈（酒馆群组存储） ---------------- */
+  /** 账号专属朋友圈/公众号群组名：老账号（feedLegacyAccount）保持原名；其他账号用「原名@账号id」保证互不串号。
+      feedLegacyAccount 在迁移或首次建群时持久化确定，避免新账号误复用旧群。 */
+  function feedGroupName(base, pid) {
+    var s = getSettings();
+    if (s.feedLegacyAccount) return pid === s.feedLegacyAccount ? base : (base + '@' + pid);
+    return base; // legacy 尚未确定：首个建群的账号临时用原名（建群成功后会把它定为 legacy）
+  }
+  /** 当前账号白名单角色的 avatar 文件名（供朋友圈/公众号群组成员：只放白名单角色，不再塞全部卡） */
+  async function whitelistMemberAvatars() {
+    var chars = await listCharacters(true);
+    var wlChars = whitelistCharsForGen(chars);
+    var avs = [];
+    (wlChars || []).forEach(function (c) {
+      var a = c && (c.avatar || c.avatar_file);
+      if (a && a !== 'none' && avs.indexOf(a) < 0) avs.push(a);
+    });
+    return avs;
+  }
   async function ensureMomentsGroup() {
     var s = getSettings();
-    if (s.momentsGroupId) {
+    var pid = currentPlayerId();
+    if (!s.momentsGroupByPlayer || typeof s.momentsGroupByPlayer !== 'object') s.momentsGroupByPlayer = {};
+    var gid = s.momentsGroupByPlayer[pid];
+    if (gid) {
       try {
         var groups0 = await st('POST', '/api/groups/all', {});
-        var g0 = (groups0 || []).find(function (g) { return String(g.id) === String(s.momentsGroupId); });
+        var g0 = (groups0 || []).find(function (g) { return String(g.id) === String(gid); });
         if (g0) return g0;
       } catch (e) {}
     }
     var groups = await st('POST', '/api/groups/all', {});
-    var byName = (groups || []).find(function (g) { return g.name === MOMENTS_GROUP_NAME; });
-    if (byName) { s.momentsGroupId = String(byName.id); saveSettings(); return byName; }
-    var chars = await listCharacters();
-    var members = [];
-    var allChars = null; try { allChars = ctx().characters || []; } catch (e) {}
-    for (var i = 0; i < (allChars || []).length; i++) {
-      var a = allChars[i] && allChars[i].avatar;
-      if (a && a !== 'none') members.push(a);
-    }
+    var myName = feedGroupName(MOMENTS_GROUP_NAME, pid);
+    var byName = (groups || []).find(function (g) { return g.name === myName; });
+    if (byName) { s.momentsGroupByPlayer[pid] = String(byName.id); saveSettings(); return byName; }
+    var members = await whitelistMemberAvatars();
     if (!members.length) members = ['none'];
     var created = await st('POST', '/api/groups/create', {
-      name: MOMENTS_GROUP_NAME,
+      name: myName,
       members: members,
       allow_self_responses: false,
       activation_strategy: 0,
@@ -614,7 +675,8 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       chat_id: String(Date.now()),
       chats: [],
     });
-    s.momentsGroupId = String(created.id);
+    s.momentsGroupByPlayer[pid] = String(created.id);
+    if (!s.feedLegacyAccount) s.feedLegacyAccount = pid; // 首个建群账号定为老账号（保持原名）
     saveSettings();
     return created;
   }
@@ -701,6 +763,8 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
   async function publishMoment(args) {
     args = args || {};
     if (!args.character || !args.text) throw new Error('角色与正文不能为空');
+    // 越权防护：只有玩家本人(__me__)或当前账号通讯录白名单角色能发朋友圈；通讯录外角色一律拒绝
+    if (String(args.character).indexOf('__me__') !== 0 && !isAllowed(args.character)) throw new Error('该角色不在当前账号通讯录，不能发朋友圈');
     var displayName = args.characterName || args.character;
     var g = await ensureMomentsGroup();
     var imgUrl = null;
@@ -726,6 +790,8 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
   async function addComment(args) {
     args = args || {};
     if (!args.momentId || !args.character || !args.text) throw new Error('缺少参数');
+    // 越权防护：只有玩家本人(__me__)或当前账号通讯录白名单角色能评论；通讯录外角色一律拒绝
+    if (String(args.character).indexOf('__me__') !== 0 && !isAllowed(args.character)) throw new Error('该角色不在当前账号通讯录，不能评论朋友圈');
     var displayName = args.characterName || args.character;
     var g = await ensureMomentsGroup();
     var mes = '【朋友圈评论】动态=' + args.momentId + ';角色=' + encodeURIComponent(displayName) + ';key=' + args.character + ';时间=' + nowIso() + ';评论=' + encodeURIComponent(args.text);
@@ -871,29 +937,27 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     return { text: String(obj.text || '').trim(), imgPrompt: String(obj.imgPrompt || '').trim() };
   }
 
-  /* ---------------- 公众号（酒馆群组存储，AI 按世界观写文） ---------------- */
+  /* ---------------- 公众号（酒馆群组存储，AI 按世界观写文；按账号隔离） ---------------- */
   async function ensureArticlesGroup() {
     var s = getSettings();
-    if (s.articlesGroupId) {
+    var pid = currentPlayerId();
+    if (!s.articlesGroupByPlayer || typeof s.articlesGroupByPlayer !== 'object') s.articlesGroupByPlayer = {};
+    var gid = s.articlesGroupByPlayer[pid];
+    if (gid) {
       try {
         var groups0 = await st('POST', '/api/groups/all', {});
-        var g0 = (groups0 || []).find(function (g) { return String(g.id) === String(s.articlesGroupId); });
+        var g0 = (groups0 || []).find(function (g) { return String(g.id) === String(gid); });
         if (g0) return g0;
       } catch (e) {}
     }
     var groups = await st('POST', '/api/groups/all', {});
-    var byName = (groups || []).find(function (g) { return g.name === ARTICLES_GROUP_NAME; });
-    if (byName) { s.articlesGroupId = String(byName.id); saveSettings(); return byName; }
-    var chars = await listCharacters();
-    var members = [];
-    var allChars = null; try { allChars = ctx().characters || []; } catch (e) {}
-    for (var i = 0; i < (allChars || []).length; i++) {
-      var a = allChars[i] && allChars[i].avatar;
-      if (a && a !== 'none') members.push(a);
-    }
+    var myName = feedGroupName(ARTICLES_GROUP_NAME, pid);
+    var byName = (groups || []).find(function (g) { return g.name === myName; });
+    if (byName) { s.articlesGroupByPlayer[pid] = String(byName.id); saveSettings(); return byName; }
+    var members = await whitelistMemberAvatars();
     if (!members.length) members = ['none'];
     var created = await st('POST', '/api/groups/create', {
-      name: ARTICLES_GROUP_NAME,
+      name: myName,
       members: members,
       allow_self_responses: false,
       activation_strategy: 0,
@@ -903,7 +967,8 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       chat_id: String(Date.now()),
       chats: [],
     });
-    s.articlesGroupId = String(created.id);
+    s.articlesGroupByPlayer[pid] = String(created.id);
+    if (!s.feedLegacyAccount) s.feedLegacyAccount = pid; // 首个建群账号定为老账号（保持原名）
     saveSettings();
     return created;
   }
@@ -1112,25 +1177,24 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     return new Blob([bytes], { type: type || 'application/octet-stream' });
   }
-  /** 当前账号通讯录白名单角色（与前端 effectiveWhitelist 对齐：手动白名单 ∪ tag 自动 − 排除） */
+  /** 当前账号通讯录白名单角色（与前端 effectiveWhitelist 对齐：按账号白名单 − 排除；tag 已一次性化，无持续自动规则） */
   function accountWhitelistChars(chars, s) {
-    var autoTags = String(s.autoWhitelistTag || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
-    var excluded = new Set((Array.isArray(s.whitelistExcluded) ? s.whitelistExcluded : []).map(String));
-    var wl = Array.isArray(s.whitelist) ? s.whitelist.map(String) : null; // null = 全部
+    var st = whitelistStoreOf();
+    var excluded = new Set((Array.isArray(st.whitelistExcluded) ? st.whitelistExcluded : []).map(String));
+    var wl = Array.isArray(st.whitelist) ? st.whitelist.map(String) : null; // null = 全部
     return (chars || []).filter(function (c) {
       var k = charKeyOf(c);
       if (excluded.has(k) || excluded.has(c.name)) return false;
-      if (wl === null && autoTags.length === 0) return false; // 无任何白名单规则 → 不导出（避免全量）
-      var inWl = (wl === null) || wl.indexOf(k) >= 0 || wl.indexOf(c.name) >= 0;
-      var inTag = autoTags.length === 0 || (Array.isArray(c.tag) && c.tag.some(function (t) { return autoTags.indexOf(String(t)) >= 0; }));
-      return inWl || inTag;
+      if (wl === null) return false; // 无白名单规则 → 不导出（避免全量）
+      return wl.indexOf(k) >= 0 || wl.indexOf(c.name) >= 0;
     });
   }
   /** 导出当前账号完整备份（不含生图 / 聊天 API Key） */
   async function exportAccountBackup() {
     var s = getSettings();
-    var activeId = s.activePlayerId;
+    var activeId = currentPlayerId();
     var player = (Array.isArray(s.players) ? s.players : []).find(function (p) { return p.id === activeId; }) || null;
+    var stWl = whitelistStoreOf(activeId);
     var chars = await listCharacters(true);
     var wlChars = accountWhitelistChars(chars, s);
     var characters = [], worlds = [], chats = [];
@@ -1157,8 +1221,9 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
         worlds.push({ fileId: fid, name: (wbSel[fid] && wbSel[fid].name) || fid, data: data });
       } catch (e) {}
     }
-    // 3) 聊天（sessions 中属于当前账号白名单角色的会话）
-    var sessionsMap = s.sessions || {};
+    // 3) 聊天（当前账号 sessions 中属于该账号白名单角色的会话）
+    var sp = (s.sessionsByPlayer && s.sessionsByPlayer[activeId]) || {};
+    var sessionsMap = (sp && sp.map) || {};
     var buckets = Object.keys(sessionsMap);
     var keySet = new Set(wlChars.map(function (x) { return x.key; }));
     for (var m = 0; m < buckets.length; m++) {
@@ -1181,13 +1246,15 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     var cfg = {};
     cfg.activePlayerId = activeId;
     cfg.players = player ? [JSON.parse(JSON.stringify(player))] : [];
-    ['whitelist', 'whitelistExcluded', 'autoWhitelistTag', 'charNotes', 'charRelations', 'momentsGroupId', 'articlesGroupId', 'enableArticle', 'imageEnabled', 'timezone', 'groupActive', 'showFab'].forEach(function (k) { if (s[k] !== undefined) cfg[k] = JSON.parse(JSON.stringify(s[k])); });
+    cfg.whitelistByPlayer = {};
+    cfg.whitelistByPlayer[activeId] = JSON.parse(JSON.stringify(stWl));
+    ['charNotes', 'charRelations', 'customRelations', 'enableArticle', 'imageEnabled', 'timezone', 'groupActive', 'showFab'].forEach(function (k) { if (s[k] !== undefined) cfg[k] = JSON.parse(JSON.stringify(s[k])); });
     if (s.chat) cfg.chat = JSON.parse(JSON.stringify(s.chat));
     if (s.image) { var im = JSON.parse(JSON.stringify(s.image)); delete im.apiKey; cfg.image = im; }
     var sessCfg = {};
     buckets.forEach(function (bk) { if (keySet.has(bk)) sessCfg[bk] = sessionsMap[bk]; });
-    cfg.sessions = sessCfg;
-    cfg.current = (s.current && keySet.has(s.current.charKey)) ? JSON.parse(JSON.stringify(s.current)) : null;
+    cfg.sessionsByPlayer = {};
+    cfg.sessionsByPlayer[activeId] = { map: sessCfg, current: (sp.current && keySet.has(sp.current.charKey)) ? JSON.parse(JSON.stringify(sp.current)) : null };
     return {
       app: 'SillyTavern-WeChat',
       kind: 'account-backup',
@@ -1200,6 +1267,39 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       chats: chats,
     };
   }
+
+  /** 删除指定账号的全部数据：私信会话映射+酒馆聊天文件、通讯录白名单、朋友圈/公众号酒馆群组。玩家信息由前端从 players 里删。 */
+  async function deleteAccountData(pid) {
+    if (!pid) return { ok: false };
+    var s = getSettings();
+    var removed = { chats: 0, groups: [] };
+    // 1) 私信会话：删映射 + 酒馆聊天文件（每个会话文件独立，不会被其他账号复用）
+    var sp = (s.sessionsByPlayer && s.sessionsByPlayer[pid]) || {};
+    var map = (sp && sp.map) || {};
+    var charKeys = Object.keys(map);
+    for (var i = 0; i < charKeys.length; i++) {
+      var ck = charKeys[i];
+      var list = map[ck] || [];
+      for (var j = 0; j < list.length; j++) {
+        var sess = list[j];
+        if (!sess || !sess.file) continue;
+        try { await st('POST', '/api/chats/delete', { avatar_url: ck, file_name: sess.file }); removed.chats++; } catch (e) {}
+      }
+    }
+    // 2) 朋友圈 / 公众号：删酒馆原生群组（群组里存了所有动态/评论/文章）
+    var mg = (s.momentsGroupByPlayer && s.momentsGroupByPlayer[pid]) || null;
+    if (mg) { try { await st('POST', '/api/groups/delete', { name: mg }); removed.groups.push(mg); } catch (e) {} }
+    var ag = (s.articlesGroupByPlayer && s.articlesGroupByPlayer[pid]) || null;
+    if (ag) { try { await st('POST', '/api/groups/delete', { name: ag }); removed.groups.push(ag); } catch (e) {} }
+    // 3) 清 settings 里该账号的分桶
+    if (s.sessionsByPlayer) delete s.sessionsByPlayer[pid];
+    if (s.whitelistByPlayer) delete s.whitelistByPlayer[pid];
+    if (s.momentsGroupByPlayer) delete s.momentsGroupByPlayer[pid];
+    if (s.articlesGroupByPlayer) delete s.articlesGroupByPlayer[pid];
+    saveSettings(s);
+    return { ok: true, removed: removed };
+  }
+
   /** 导入账号备份：角色卡 / 世界书 / 聊天写回酒馆（配置由前端写 settings） */
   async function importAccountBackup(payload) {
     var result = { characters: [], worlds: [], chats: [], skipped: [] };
@@ -1240,19 +1340,16 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
   }
 
   /* ---------------- 角色人设世界书（自动生成，供群聊按关键词激活） ---------------- */
-  /** 通讯录角色 = 手动白名单 ∪ autoWhitelistTag 命中 − whitelistExcluded（与前端 effectiveWhitelist 对齐） */
+  /** 当前账号通讯录角色 = 按账号白名单 − 排除（tag 已一次性化，无持续自动规则） */
   function whitelistCharsForGen(chars) {
-    var s = getSettings();
-    var autoTags = String(s.autoWhitelistTag || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
-    var excluded = new Set((Array.isArray(s.whitelistExcluded) ? s.whitelistExcluded : []).map(String));
-    var wl = Array.isArray(s.whitelist) ? s.whitelist.map(String) : null; // null = 全部
+    var st = whitelistStoreOf();
+    var excluded = new Set((Array.isArray(st.whitelistExcluded) ? st.whitelistExcluded : []).map(String));
+    var wl = Array.isArray(st.whitelist) ? st.whitelist.map(String) : null; // null = 全部
     return (chars || []).filter(function (c) {
       var k = String(charKeyOf(c));
       if (excluded.has(k) || excluded.has(c.name)) return false;
       if (wl === null) return true;
-      if (wl.indexOf(k) >= 0 || wl.indexOf(c.name) >= 0) return true;
-      if (autoTags.length && (c.tag || []).some(function (t) { return autoTags.indexOf(String(t)) >= 0; })) return true;
-      return false;
+      return wl.indexOf(k) >= 0 || wl.indexOf(c.name) >= 0;
     });
   }
   /** 角色卡名 → 世界书关键词候选（去空格 / 尾字简称，与群聊 keyByName 别名逻辑一致） */
@@ -1363,6 +1460,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     var im = imageConfig();
     var cc = chatConfig();
     var w = whitelistOf();
+    var stWl = whitelistStoreOf();
     var cfg = {
       stUrl: location.origin,
       imageEnabled: im.enabled,
@@ -1372,8 +1470,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       imageDefaultPreset: im.defaultPreset || '',
       chatModel: cc.model,
       whitelist: w,
-      autoWhitelistTag: String(getSettings().autoWhitelistTag || '').trim(),
-      whitelistExcluded: Array.isArray(getSettings().whitelistExcluded) ? getSettings().whitelistExcluded.map(String) : [],
+      whitelistExcluded: (Array.isArray(stWl.whitelistExcluded) ? stWl.whitelistExcluded : []).map(String),
       autoPost: !!getSettings().autoPost,
       autoComment: !!getSettings().autoComment,
       autoCommentMin: getSettings().autoCommentMin != null ? getSettings().autoCommentMin : 1,
@@ -1716,7 +1813,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     if (old) { old.remove(); }
     var s = getSettings();
     var chars = null; try { chars = ctx().characters || []; } catch (e) {}
-    var curWhitelist = Array.isArray(s.whitelist) ? s.whitelist.map(String) : null;
+    var curWhitelist = whitelistOf(); // 当前账号白名单（切号系统）
     var chat = s.chat || {};
     var im = s.image || {};
     var cfg = chatConfig();
@@ -1724,15 +1821,9 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
 
     // 白名单行：value=key(avatar 文件名)，label=展示名（同名加后缀）
     var nameCount = {};
-    (chars || []).forEach(function (c) { nameCount[c.name] = (nameCount[c.name] || 0) + 1; });
-    var seen = {};
     var charRows = (chars || []).map(function (c) {
       var key = String(c.avatar || c.name);
-      var label = c.name;
-      if (nameCount[c.name] > 1) {
-        seen[c.name] = (seen[c.name] || 0) + 1;
-        label = c.name + (seen[c.name] > 1 ? ' #' + seen[c.name] : '');
-      }
+      var label = c.name; // 同名角色不再加 #2 后缀，靠 key/备注区分
       var checked = !curWhitelist || curWhitelist.indexOf(key) >= 0 || curWhitelist.indexOf(String(c.name)) >= 0;
       return '<label class="wxst-row" title="' + escHtml(c.avatar || c.name) + '"><input type="checkbox" class="wxst-wl" value="' + escHtml(key) + '"' + (checked ? ' checked' : '') + '> <span>' + escHtml(label) + '</span></label>';
     }).join('');
@@ -1764,9 +1855,8 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
               '<label class="wxst-row"><input type="checkbox" id="wxst-showfab"' + (s.showFab !== false ? ' checked' : '') + '> 显示右下角悬浮按钮</label>' +
             '</div>' +
             '<div class="wxst-set-section"><div class="wxst-set-title">通讯录</div>' +
-              '<label class="wxst-row">自动加入通讯录的 tag <span class="wxst-tag-val" id="wxst-auto-tag-val" data-val="' + escHtml(s.autoWhitelistTag || '') + '" style="color:#07C160;font-weight:600;margin-left:4px;word-break:break-all">' + escHtml(s.autoWhitelistTag || '未设置') + '</span></label>' +
-              '<div class="wxst-row" style="gap:8px"><button class="wxst-mini-btn" id="wxst-auto-tag-pick" type="button">选择标签</button><button class="wxst-mini-btn" id="wxst-auto-tag-clear" type="button">清空</button></div>' +
-              '<div class="wxst-set-tip">点「选择标签」从酒馆现有 tag 里勾选（可多选，逗号分隔）。打中任一所选 tag 的角色会自动出现在通讯录；也可在「新朋友」里移除（会记住排除）。</div>' +
+              '<div class="wxst-row" style="gap:8px"><button class="wxst-mini-btn" id="wxst-auto-tag-pick" type="button">🏷 按标签一键添加进通讯录</button></div>' +
+              '<div class="wxst-set-tip">选一个标签 → 把当前所有带该标签的角色卡<b>一次性</b>加入本账号通讯录（立即生效，仅此一次，之后不再持续自动加）。要加更多角色请在「新朋友」里同意。</div>' +
             '</div>' +
             '<div class="wxst-set-section"><div class="wxst-set-title">聊天</div>' +
               '<label>全局聊天背景 <input id="wxst-chatbg" value="' + escHtml(s.chatBg || '') + '" placeholder="色值如 #E8E8E8 或图片 URL；每个角色也可在「角色详情 → 聊天背景」单独设置"></label>' +
@@ -1890,22 +1980,29 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     document.getElementById('wxst-set-close').addEventListener('click', function () { modal.remove(); });
     modal.addEventListener('click', function (e) { if (e.target.classList && e.target.classList.contains('wxst-settings-mask')) modal.remove(); });
 
-    // 通讯录 tag：读取酒馆现有 tag 弹窗选择（可多选）
-    var tagValEl = document.getElementById('wxst-auto-tag-val');
+    // 通讯录 tag（一次性）：选标签 → 直接把命中角色加进当前账号白名单，立即生效、不保留规则
     var tagPickEl = document.getElementById('wxst-auto-tag-pick');
     if (tagPickEl) tagPickEl.addEventListener('click', function () {
-      var cur = String(tagValEl.getAttribute('data-val') || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-      wxstTagPicker(cur, function (picked) {
-        if (!picked) return;
-        var v = picked.join(',');
-        tagValEl.setAttribute('data-val', v);
-        tagValEl.textContent = v || '未设置';
+      wxstTagPicker([], function (picked) {
+        if (!picked || !picked.length) return;
+        var tags = picked.map(String);
+        (async function () {
+          try {
+            var chars = await listCharacters(true);
+            var keys = [];
+            (chars || []).forEach(function (c) {
+              if (Array.isArray(c.tag) && c.tag.some(function (t) { return tags.indexOf(String(t)) >= 0; })) {
+                var k = String(charKeyOf(c));
+                if (k && keys.indexOf(k) < 0) keys.push(k);
+              }
+            });
+            if (!keys.length) { toast('所选标签下没有角色卡', 'warning'); return; }
+            addToWhitelist(keys);
+            toast('已把 ' + keys.length + ' 个角色加入通讯录（一次性，不再自动加）', 'success');
+            reloadApp();
+          } catch (e) { toast('添加失败：' + e.message, 'error'); }
+        })();
       });
-    });
-    var tagClearEl = document.getElementById('wxst-auto-tag-clear');
-    if (tagClearEl) tagClearEl.addEventListener('click', function () {
-      tagValEl.setAttribute('data-val', '');
-      tagValEl.textContent = '未设置';
     });
 
     // 预设增删
@@ -2000,8 +2097,6 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       s.autoCommentN = _amax;
       var eaEl = document.getElementById('wxst-enable-article');
       if (eaEl) s.enableArticle = eaEl.checked;
-      var tagEl = document.getElementById('wxst-auto-tag-val');
-      if (tagEl) s.autoWhitelistTag = String(tagEl.getAttribute('data-val') || '').trim();
       var bgEl = document.getElementById('wxst-chatbg');
       if (bgEl) s.chatBg = String(bgEl.value || '').trim();
       // AI 回复行为
@@ -2209,6 +2304,13 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
   async function saveWeChatMessage(name, msg) {
     var meta = groupMeta()[name];
     if (!meta) throw new Error('群不存在');
+    // 越权防护（最终防线）：AI 成员发言必须是群成员；玩家(__me__)本人与系统(__system__)通知放行。
+    // 任何不在群成员名单里的角色消息一律静默拒绝，杜绝「群里没这个人却冒出来发消息」。
+    var wk = String(msg.key || '');
+    if (wk && wk.indexOf('__me__') !== 0 && wk.indexOf('__system__') !== 0) {
+      var memberKeys = meta.memberKeys || [];
+      if (memberKeys.indexOf(wk) < 0) return { ok: false, skipped: true };
+    }
     var g = await ensureWeChatGroup(name);
     var chat = await getGroupChatRaw(g);
     // 统一 URL 编码存储：内容/卡片可含任意字符（; = 等不再破坏解析）；card 支持转发卡片；system 标记系统通知
@@ -2584,6 +2686,13 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       };
     }
     var result = [];
+    // 越权/人设防护：AI 生成的发言者必须是群成员（memberKeys）；玩家(__me__)由本人说话，AI 绝不代发言。
+    // 若 AI 幻觉出「群外角色」，该条【直接丢弃】——不换人、不重写，避免把群外角色的人设/口吻安到群内成员头上。
+    var memberKeySet = {};
+    members.forEach(function (m) { memberKeySet[m.key] = true; });
+    function isMemberKey(k) {
+      return !!k && memberKeySet[k] && String(k).indexOf('__me__') !== 0;
+    }
     bubbles.forEach(function (b) {
       var pm = parseRoleMsg(b);
       var key = firstKey, text = b;
@@ -2594,6 +2703,8 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       text = cleanGroupText(text);
       // 启发式过滤：疑似泄漏/超长说明直接丢弃
       if (!text || text.length > 300 || /(TA的设定|TA 的设定|【现在开始】|【群成员设定】|姓名：|性别：|身高：|出生地：|入学等级：)/.test(text)) return;
+      // 越权/人设防护：发言者必须是群成员；幻觉出的群外角色这条直接丢弃
+      if (!isMemberKey(key)) return;
       result.push({ key: key, text: text });
     });
     // 模型确实返回了但全被过滤（可能只是几句跑偏的规则）→ 取过滤前第一条兜底
@@ -2602,7 +2713,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       var pm0 = parseRoleMsg(b0);
       var k0 = (pm0 && pm0.roleName && keyByName[pm0.roleName]) || firstKey;
       var t0 = cleanGroupText(pm0 ? pm0.text : b0);
-      if (t0) result.push({ key: k0, text: t0 });
+      if (t0 && isMemberKey(k0)) result.push({ key: k0, text: t0 });
     }
     return result;
   }
@@ -2636,6 +2747,9 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     listCharacters: listCharacters,
     isAllowed: isAllowed,
     whitelistOf: whitelistOf,
+    saveWhitelistState: saveWhitelistState,
+    /** 旧全局数据 → 当前账号 一次性迁移（导入旧备份后调用，保证切号系统数据就位） */
+    migrateAccountData: function () { return migrateAccountScoped(); },
     getChat: getChat,
     saveChat: saveChat,
     deleteChat: deleteChat,
@@ -2665,6 +2779,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     genRoleWorldbook: genRoleWorldbook,
     exportAccount: exportAccountBackup,
     importAccount: importAccountBackup,
+    deleteAccountData: deleteAccountData,
     listWeChatGroups: listWeChatGroups,
     getWeChatGroup: getWeChatGroup,
     createWeChatGroup: createWeChatGroup,
@@ -2689,9 +2804,71 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
 
   /* =============================== 启动 =============================== */
 
+  /* ---------------- 旧数据一次性迁移：全局白名单/会话/朋友圈/公众号 → 归到当前账号 ---------------- */
+  async function migrateAccountScoped() {
+    var s = getSettings();
+    var pid = currentPlayerId();
+    var dirty = false;
+    var st = whitelistStoreOf(pid); // lazy 迁移旧 whitelist/whitelistExcluded/autoWhitelistTag → st
+    // 1) 旧全局白名单字段 → 当前账号（兜底并清理旧字段）
+    if (s.whitelist !== undefined || s.whitelistExcluded !== undefined) {
+      if (s.whitelist !== undefined && !('whitelist' in st)) st.whitelist = Array.isArray(s.whitelist) ? s.whitelist.map(String) : null;
+      if (Array.isArray(s.whitelistExcluded) && !Array.isArray(st.whitelistExcluded)) st.whitelistExcluded = s.whitelistExcluded.map(String);
+      delete s.whitelist; delete s.whitelistExcluded;
+      dirty = true;
+    } else if (Array.isArray(st.whitelist) && st.whitelist.length === 0 && (s.sessions !== undefined || s.momentsGroupId !== undefined || s.articlesGroupId !== undefined)) {
+      // 老账号从未设置白名单（无旧 whitelist 字段但有旧会话/朋友圈数据）→ 视为全部角色(null)，而非空通讯录
+      st.whitelist = null;
+      dirty = true;
+    }
+    // 2) 会话旧字段 → 当前账号
+    if (s.sessions !== undefined || s.current !== undefined) {
+      if (!s.sessionsByPlayer || typeof s.sessionsByPlayer !== 'object') s.sessionsByPlayer = {};
+      if (!s.sessionsByPlayer[pid] || typeof s.sessionsByPlayer[pid] !== 'object') s.sessionsByPlayer[pid] = {};
+      if (s.sessions !== undefined && s.sessionsByPlayer[pid].map === undefined) s.sessionsByPlayer[pid].map = s.sessions;
+      if (s.current !== undefined && s.sessionsByPlayer[pid].current === undefined) s.sessionsByPlayer[pid].current = s.current;
+      delete s.sessions; delete s.current;
+      dirty = true;
+    }
+    // 3) 朋友圈/公众号旧群组 → 当前账号（并标记 legacy 账号，保证老群保持原名）
+    if (s.momentsGroupId !== undefined || s.articlesGroupId !== undefined) {
+      if (!s.momentsGroupByPlayer || typeof s.momentsGroupByPlayer !== 'object') s.momentsGroupByPlayer = {};
+      if (!s.articlesGroupByPlayer || typeof s.articlesGroupByPlayer !== 'object') s.articlesGroupByPlayer = {};
+      if (s.momentsGroupId !== undefined && s.momentsGroupByPlayer[pid] === undefined) { s.momentsGroupByPlayer[pid] = String(s.momentsGroupId); if (!s.feedLegacyAccount) s.feedLegacyAccount = pid; }
+      if (s.articlesGroupId !== undefined && s.articlesGroupByPlayer[pid] === undefined) { s.articlesGroupByPlayer[pid] = String(s.articlesGroupId); if (!s.feedLegacyAccount) s.feedLegacyAccount = pid; }
+      delete s.momentsGroupId; delete s.articlesGroupId;
+      dirty = true;
+    }
+    // 4) 旧「自动加入 tag」一次性化（放最后：即使角色列表未就绪也不阻塞上面迁移）：
+    //    把命中角色直接写进当前账号白名单，之后不再有持续规则
+    if (s.autoWhitelistTag !== undefined || st.autoWhitelistTag) {
+      var autoTags = String(st.autoWhitelistTag || s.autoWhitelistTag || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+      if (autoTags.length && st.whitelist !== null) {
+        var tagDone = false;
+        try {
+          var chars = await listCharacters();
+          (chars || []).forEach(function (c) {
+            if (Array.isArray(c.tag) && c.tag.some(function (t) { return autoTags.indexOf(String(t)) >= 0; })) {
+              var k = String(charKeyOf(c));
+              if (k && st.whitelist.indexOf(k) < 0) st.whitelist.push(k);
+            }
+          });
+          tagDone = true;
+        } catch (e) {}
+        if (!tagDone) return; // 角色未就绪：保留 autoWhitelistTag，下次启动再迁移
+      }
+      delete s.autoWhitelistTag;
+      if (st.autoWhitelistTag !== undefined) delete st.autoWhitelistTag;
+      dirty = true;
+    }
+    if (dirty) saveSettings();
+  }
+
   function init() {
     applyEnabled();
     ensureSettingsPanel();
+    // 一次性迁移旧全局数据到当前账号（切号系统启用）；不阻塞启动
+    migrateAccountScoped().catch(function (e) { log('账号数据迁移失败:', e && e.message); });
     // ST 扩展菜单/设置容器是异步构建的，稍后重试几次确保入口挂上
     setTimeout(function () { buildMenuEntry(); ensureSettingsPanel(); }, 1500);
     setTimeout(function () { buildMenuEntry(); ensureSettingsPanel(); }, 4000);

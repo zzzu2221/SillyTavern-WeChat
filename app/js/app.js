@@ -26,19 +26,12 @@ const App = (() => {
   let currentTab = 'chatlist';
 
   /* ---- 数据加载 ---- */
-  /** 有效通讯录：手动白名单 ∪ 带 autoWhitelistTag 的角色 − 手动排除的 */
+  /** 有效通讯录：当前账号白名单 − 手动排除（tag 已一次性化，无持续自动规则） */
   function effectiveWhitelist() {
     const cfg = state.config || {};
     const wl = (Array.isArray(cfg.whitelist) ? cfg.whitelist : []).map(String);
     const excluded = (Array.isArray(cfg.whitelistExcluded) ? cfg.whitelistExcluded : []).map(String);
-    // 自动 tag 支持多选（逗号分隔）：命中任一 tag 即加入
-    const autoTags = String(cfg.autoWhitelistTag || '').split(',').map(s => s.trim()).filter(Boolean);
     const keys = new Set(wl);
-    if (autoTags.length) {
-      state.allCharacters.forEach(c => {
-        if ((c.tag || []).some(t => autoTags.indexOf(t) >= 0)) keys.add(String(c.key || c.avatar_file || c.name));
-      });
-    }
     excluded.forEach(k => keys.delete(k));
     return keys;
   }
@@ -134,6 +127,21 @@ const App = (() => {
     Me.render();
   }
 
+  /** 切号后整体刷新：重新拉当前账号配置/白名单/角色/会话，回到会话列表（各 Tab 数据随之切换） */
+  async function reloadForAccount() {
+    try {
+      await loadConfig();
+      await Store.syncFromServer();
+      await refreshCharacters();
+      // 关闭可能打开的全屏子页，回到会话列表（其数据来自新账号）
+      showTab('chatlist');
+      return true;
+    } catch (e) {
+      UI.toast('切换账号刷新失败：' + e.message);
+      return false;
+    }
+  }
+
   /* ---- 启动 ---- */
   async function init() {
     // Tab 绑定
@@ -168,7 +176,7 @@ const App = (() => {
 
   return {
     state, init, showTab, showPage,
-    refreshCharacters, loadConfig,
+    refreshCharacters, loadConfig, reloadForAccount,
     effectiveWhitelist,
     charByName, charByKey, charByAvatar, charKey, displayName, openCharacter,
     setBackHandler, hasBack, consumeBack,

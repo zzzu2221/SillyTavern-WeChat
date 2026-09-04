@@ -99,6 +99,12 @@ const API = (() => {
     saveAppSettings: (patch) => { requireBridge().saveAppSettings(patch || {}); return true; },
     openSettings: () => requireBridge().openSettings(),
     isAllowed: (name) => { try { const b = bridge(); return b ? b.isAllowed(name) : true; } catch (e) { return true; } },
+    /* 保存当前账号白名单状态（切号系统：写 whitelistByPlayer[当前账号]） */
+    saveWhitelistState: (patch) => { requireBridge().saveWhitelistState(patch || {}); return true; },
+    /* 旧全局数据 → 当前账号 一次性迁移（导入旧备份后调用） */
+    migrateAccountData: () => requireBridge().migrateAccountData(),
+    /* 删除指定账号的全部数据（私信会话+聊天文件、通讯录白名单、朋友圈/公众号群组），玩家信息由前端删 */
+    deleteAccountData: (pid) => requireBridge().deleteAccountData(pid),
 
     /* --- 用户设定 / 世界书（酒馆） --- */
     listPersonas: () => requireBridge().listPersonas(),

@@ -210,6 +210,8 @@ const Me = (() => {
         cfg.players = curPlayers;
       }
       API.saveAppSettings(cfg);
+      // 旧备份（全局 whitelist/sessions）导入后一次性迁移到当前账号（切号系统）
+      try { await API.migrateAccountData(); } catch (e) {}
       if (typeof Store !== 'undefined' && Store.syncFromServer) Store.syncFromServer();
       await App.loadConfig();
       await App.refreshCharacters();
@@ -317,13 +319,15 @@ const Me = (() => {
       };
       const nl = players(); nl.push(np);
       savePlayers(nl, np.id);
-      UI.toast('已导入并切换为当前账号');
+      UI.toast('已导入并切换为当前账号，加载数据…');
+      await App.reloadForAccount();
       renderAccount();
     });
     body.querySelectorAll('.acct-use').forEach(b => {
       b.addEventListener('click', async () => {
         savePlayers(players(), b.dataset.id);
-        UI.toast('已切换账号');
+        UI.toast('已切换账号，加载该账号数据…');
+        await App.reloadForAccount();
         renderAccount();
       });
     });
@@ -333,12 +337,15 @@ const Me = (() => {
     body.querySelectorAll('.acct-del').forEach(b => {
       b.addEventListener('click', async (e) => {
         e.stopPropagation();
-        const ok = await UI.confirm('删除该账号？', { okText: '删除' });
-        if (!ok) return;
         const id = b.dataset.id;
+        const ok = await UI.confirm('删除该账号？\n将一并删除该账号的私信会话、通讯录、朋友圈和公众号内容，不可恢复。', { okText: '删除' });
+        if (!ok) return;
+        UI.toast('正在清理该账号数据…');
+        try { await API.deleteAccountData(id); } catch (e) {}
         const rest = players().filter(x => x.id !== id);
         savePlayers(rest.length ? rest : [{ id: 'me', name: '我', signature: '', avatar: '', cover: '', relations: [], worldbook: '' }], rest.length ? (rest[0].id) : 'me');
-        UI.toast('已删除');
+        UI.toast('已删除，加载剩余账号数据…');
+        await App.reloadForAccount();
         renderAccount();
       });
     });
@@ -461,6 +468,58 @@ const Me = (() => {
   }
 
   /* ---------- 账号编辑（头像 / 封面 / 关系 / 世界书） ---------- */
+
+  /** AI 生成个性签名：依据最近私聊/群聊记录，没有则随机生成 */
+  async function genAISignature() {
+    const btn = document.getElementById('acct-sig-ai');
+    const input = document.getElementById('acct-sig');
+    if (!btn || !input) return;
+    const oldText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '生成中…';
+    try {
+      // 收集最近私聊记录（遍历白名单角色的会话预览）
+      const chatBits = [];
+      try {
+        const allSessions = [];
+        for (const c of (App.state.characters || [])) {
+          try {
+            const ss = Store.sessionsOf(App.charKey(c), App.displayName(c));
+            for (const s of ss) allSessions.push(s);
+          } catch (e) {}
+        }
+        allSessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        for (const s of allSessions.slice(0, 6)) {
+          if (s.preview) chatBits.push(s.preview);
+        }
+      } catch (e) {}
+      // 收集最近群聊记录
+      const groupBits = [];
+      try {
+        const groups = await API.listWeChatGroups();
+        for (const g of (groups || []).slice(0, 3)) {
+          for (const m of (g.messages || []).slice(-3)) {
+            if (m && m.text) groupBits.push(String(m.text).slice(0, 60));
+          }
+        }
+      } catch (e) {}
+      const material = chatBits.concat(groupBits).slice(0, 12).join('\n');
+      const sys = material
+        ? '你是微信个性签名生成器。根据下面这些最近的聊天记录片段，生成一条符合说话人性格和语气的中文个性签名。要求：10~30字，简短有味道，可以是吐槽、感慨、宣言或生活状态，不要加引号，不要解释，只输出签名本身。'
+        : '你是微信个性签名生成器。随机生成一条中文个性签名。要求：10~30字，简短有味道，可以是吐槽、感慨、宣言或生活状态，不要加引号，不要解释，只输出签名本身。';
+      const user = material ? ('最近聊天记录：\n' + material + '\n\n生成个性签名：') : '生成一条个性签名：';
+      const r = await API.genChat([{ role: 'system', content: sys }, { role: 'user', content: user }], { temperature: 0.9 });
+      const text = (r && r.content ? r.content : '').trim().replace(/^["'「『]+|["'」』]+$/g, '').slice(0, 50);
+      if (text) input.value = text;
+      else UI.toast('生成失败，请重试');
+    } catch (e) {
+      UI.toast('生成失败：' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = oldText;
+    }
+  }
+
   function openAccountModal(id) {
     const list = players();
     const isNew = !id;
@@ -472,6 +531,7 @@ const Me = (() => {
     document.getElementById('acct-desc').value = p.description || p.worldbook || '';
     document.getElementById('acct-wb').value = p.worldbook || '';
     document.getElementById('acct-tip').textContent = '';
+    document.getElementById('acct-sig-ai').onclick = () => genAISignature();
     const coverPrev = document.getElementById('acct-cover-preview');
     if (p.cover && p.cover.startsWith('data:')) { coverPrev.src = p.cover; coverPrev.style.display = 'block'; }
     else coverPrev.style.display = 'none';

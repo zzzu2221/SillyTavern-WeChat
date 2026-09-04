@@ -110,21 +110,25 @@ const Active = (() => {
     const others = pool.filter(x => x.name !== avoid);
     const chosen = (others.length ? others : pool)[Math.floor(Math.random() * (others.length ? others.length : pool.length))];
     if (!chosen || !chosen.name) return false;
-    markDone('group');
-    rememberPick('group', chosen.name);
-    try { await backgroundGroupChat(chosen.name); } catch (e) {}
+    let wrote = 0;
+    try { wrote = await backgroundGroupChat(chosen.name); } catch (e) {}
+    // 只有真实产出（群内成员说了话）才消耗冷却；若本轮发言全是幻觉被丢弃，下个周期再试，避免群聊长期静默
+    if (wrote > 0) {
+      markDone('group');
+      rememberPick('group', chosen.name);
+    }
     return true;
   }
 
-  /** 后台群聊（不依赖当前打开哪个群）：读群最新消息 → 让成员自发聊几句 → 写回消息；首轮后按最新消息再延续一轮，避免"角色发了没人理" */
+  /** 后台群聊（不依赖当前打开哪个群）：读群最新消息 → 让成员自发聊几句 → 写回消息；首轮后按最新消息再延续一轮，避免"角色发了没人理"。返回本轮实际写入的条数 */
   async function backgroundGroupChat(name) {
     const g = await API.getWeChatGroup(name);
-    if (!g || !Array.isArray(g.members)) return;
+    if (!g || !Array.isArray(g.members)) return 0;
     const now = Date.now();
     const muted = (g.meta && g.meta.muted) || {};
     const activeMembers = g.members.filter(m => !(muted[m.key] && muted[m.key] > now));
     const aiMembers = activeMembers.filter(m => String(m.key || '').indexOf('__me__') !== 0);
-    if (!aiMembers.length) return;
+    if (!aiMembers.length) return 0;
     const p = (typeof Me !== 'undefined') ? Me.activePlayer() : null;
     const rels = (p && Array.isArray(p.relations)) ? p.relations : [];
     const members = activeMembers.map(m => {
@@ -142,17 +146,11 @@ const Active = (() => {
       let wrote = 0;
       for (const o of out.slice(0, 3)) {
         await sleep(600 + Math.random() * 900);
-        let key = null;
-        const member = members.find(x => x.name === o.key);
-        if (member) key = member.key;
-        else if (App.charByKey(o.key)) key = o.key;
-        if (!key || String(key).indexOf('__me__') === 0) {
-          const fb = aiMembers[Math.floor(Math.random() * aiMembers.length)];
-          key = fb ? fb.key : null;
-        }
-        if (!key || String(key).indexOf('__me__') === 0) continue;
-        if (muted[key] && muted[key] > Date.now()) continue;
-        await API.saveWeChatMessage(name, { name: displayName(key, o.key), key, text: o.text });
+        // 只允许群成员发言：幻觉出的群外角色【直接丢弃】，不换人、不重写，避免人设串味
+        const member = members.find(x => x.key === o.key);
+        if (!member || String(member.key || '').indexOf('__me__') === 0) continue;
+        if (muted[member.key] && muted[member.key] > Date.now()) continue;
+        await API.saveWeChatMessage(name, { name: displayName(member.key, o.key), key: member.key, text: o.text });
         wrote++;
       }
       return wrote;
@@ -178,13 +176,16 @@ const Active = (() => {
       } catch (e) {}
     }
     if (wrote && typeof ChatList !== 'undefined' && ChatList.render) ChatList.render();
+    return wrote;
   }
 
   /* ---- 3. 主动朋友圈：关联角色发圈（独立开关+带图概率，避免连续同一人） ---- */
   async function doMoment() {
     const ac = cfg();
     if (!ac.enabled || !ac.momentEnabled || !passed('moment', ac.momentHours)) return false;
-    const chars = relatedChars();
+    // 只允许「当前账号通讯录白名单里」的关联角色发圈：不在通讯录的人不会冒出来发朋友圈
+    const wlSet = new Set((App.state.characters || []).map(x => App.charKey(x)));
+    const chars = relatedChars().filter(c => wlSet.has(App.charKey(c)));
     if (!chars.length) return false;
     const c = pickAvoid(chars, lastPicked('moment'));
     if (!c) return false;
@@ -203,6 +204,8 @@ const Active = (() => {
       const payload = { character: key, characterName: name, text };
       if (withImg && r.imgPrompt) payload.imagePrompt = r.imgPrompt;
       const post = await API.publishMoment(payload);
+      // AI 主动发圈成功 → 朋友圈 tab 未读 +1（用户进入朋友圈时清零）
+      if (post && post.id && typeof Moments !== 'undefined' && Moments.incUnread) Moments.incUnread();
       // 发圈后 AI 自动评论（沿用 autoComment 开关）
       if (post && post.id && (App.state && App.state.config && App.state.config.autoComment) && typeof Moments !== 'undefined' && Moments.autoCommentMoment) {
         try { await Moments.autoCommentMoment({ id: post.id, key, character: name, text }); } catch (e) {}

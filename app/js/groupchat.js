@@ -440,13 +440,10 @@ const GroupChat = (() => {
           // AI 试图以玩家身份发言（玩家名 / 「玩家」 / 「我」）→ 直接跳过，玩家由本人说话
           const p0 = meInfo();
           if (o.key === p0.name || o.key === '玩家' || o.key === '我') continue;
-          // AI 输出的「角色=名字」是微信备注名，映射回角色 key
+          // AI 输出的 key 映射回群成员（只允许群成员发言；幻觉出的群外角色直接跳过，避免人设串味）
           let key = null;
-          const member = members.find(x => x.name === o.key);
+          const member = members.find(x => x.key === o.key || x.name === o.key);
           if (member) key = member.key;
-          else if (App.charByKey(o.key)) key = o.key;
-          // 兜底也避开玩家（玩家不会由 AI 代发言，否则会把 AI 的话错存成「我」）
-          if (!key) { const fb = activeMembers.find(m => String(m.key || '').indexOf('__me__') !== 0); key = (fb && fb.key) || null; }
           // 玩家由本人说话：AI 若跑偏输出玩家名，跳过不写入
           if (!key || String(key || '').indexOf('__me__') === 0) continue;
           // 写入前兜底：若该成员此刻已被禁言（AI 可能选错），跳过这条

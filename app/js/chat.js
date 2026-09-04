@@ -291,12 +291,15 @@ const Chat = (() => {
     let player = null;
     try { player = (typeof Me !== 'undefined') ? Me.activePlayer() : null; } catch (e) {}
     if (player) {
-      const rel = (player.relations || []).find(r => r.key === App.charKey(c));
+      const cKey = App.charKey(c);
+      // 关系匹配：优先 key（avatar 文件名），兼容旧数据里可能用角色名存的情况
+      const rel = (player.relations || []).find(r => r.key === cKey || r.key === c.name || (r.name && r.name === c.name));
       if (rel) {
         parts.push(`我和你的关系：${rel.relation}${rel.note ? '（' + rel.note + '）' : ''}`);
       }
       if (player.name && player.name !== '我') parts.push(`我是「${player.name}」。`);
       if (player.signature) parts.push(`我的个性签名：${player.signature}`);
+      if (player.description) parts.push(`关于我（账号设定）：${player.description}`);
       const playerWb = [player.mountedText, player.worldbook].filter(Boolean).join('\n');
       if (playerWb) parts.push(`关于我（世界书/设定）：${playerWb}`);
     }
@@ -399,19 +402,21 @@ const Chat = (() => {
       if (pendingMap[myFile] === myReq) delete pendingMap[myFile];
       // 私聊建群：AI 回复提到「拉群/建群 + 成员名」→ 真建群（AI 角色当群主）。受群活跃的 aiManage 开关控制
       maybeDmGroupCreate(content, myChar, myChat);
-      // 未读计数：用户此刻正打开该会话且聊天页可见 → 不算未读；否则 +1
+      // 未读计数：AI 回复完成时【重新】判断用户是否仍在看该会话——
+      // 用户可能在生成过程中秒退，若用函数开头算死的 viewing，会导致退出后也不 +1、列表不刷新
+      const stillViewing = !opts.char && ctx.session && ctx.session.file === myFile && isChatPageVisible();
       const s = Store.sessionsOf(myCharKey, myCharName).find(x => x.file === myFile);
       const preview = stripActions(splitBubbles(content)[0] || '');
       Store.touchSession(myCharKey, myCharName, myFile, {
         preview: preview.slice(0, 60),
         updatedAt: Date.now(),
-        unread: viewing ? 0 : ((s && s.unread) || 0) + 1,
+        unread: stillViewing ? 0 : ((s && s.unread) || 0) + 1,
         typing: false,
       });
       // 若用户已退出该聊天页：实时刷新会话列表（未读红点 / 预览）
-      if (!viewing && typeof ChatList !== 'undefined') ChatList.render();
+      if (!stillViewing && typeof ChatList !== 'undefined') ChatList.render();
       // 若当前正打开该会话 → 逐条弹出；否则只写回文件，回来时重新渲染
-      if (viewing) {
+      if (stillViewing) {
         const bubbles = splitBubbles(content);
         if (bubbles.length) appendReplyBubbles(bubbles, myChat.length - 1);
         else render();
