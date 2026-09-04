@@ -1,4 +1,4 @@
-/* ============ 微信群聊：群列表 / 群会话 / 建群 / AI 群回复 ============ */
+﻿/* ============ 微信群聊：群列表 / 群会话 / 建群 / AI 群回复 ============ */
 const GroupChat = (() => {
   let current = null;   // {name, meta, members, messages}
   let busy = false;
@@ -58,7 +58,7 @@ const GroupChat = (() => {
     try {
       const p = (typeof Me !== 'undefined') ? Me.activePlayer() : null;
       if (!p) return '';
-      return [p.description, p.signature, p.worldbook].filter(Boolean).join('\n').slice(0, 600);
+      return [p.description, p.signature, p.mountedText, p.worldbook].filter(Boolean).join('\n').slice(0, 600);
     } catch (e) { return ''; }
   }
   function groupAvatarHtml(g) {
@@ -550,7 +550,7 @@ const GroupChat = (() => {
   function candidateNames(c) {
     const set = new Set();
     const push = s => { s = String(s || '').trim(); if (s.length >= 2) set.add(s); };
-    const display = App.displayName(c);
+    const display = charDisplayName(App.charKey(c), App.displayName(c));
     const real = String(c.name || '').trim();
     push(display); push(real);
     if (display && display.length > 2) push(display.slice(0, 2));
@@ -839,7 +839,7 @@ const GroupChat = (() => {
       const avatar = UI.avatarSrc(c.avatar) ? `<img src="${UI.esc(UI.avatarSrc(c.avatar))}">` : '';
       return `<label class="share-char-item" data-key="${UI.esc(App.charKey(c))}">
         <span class="avatar sm">${avatar}</span>
-        <span class="share-char-name">${UI.esc(App.displayName(c))}</span>
+        <span class="share-char-name">${UI.esc(charDisplayName(App.charKey(c), App.displayName(c)))}</span>
         <input type="checkbox" value="${UI.esc(App.charKey(c))}">
       </label>`;
     }).join('');
@@ -1051,7 +1051,7 @@ const GroupChat = (() => {
           <div class="gi-sub">${nonMeMembers.length + 1} 位成员</div>
         </div>
         <button class="gi-btn" id="gi-change-avatar">更换头像</button>
-        <input type="file" id="gi-avatar-file" accept="image/*" style="display:none">
+        <input type="file" id="gi-avatar-file" accept="image/*" style="position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0">
       </div>
       <div class="gi-section" id="gi-name-row">
         <div class="gi-label">群聊名称</div>
@@ -1155,7 +1155,7 @@ const GroupChat = (() => {
       const avatar = UI.avatarSrc(c.avatar) ? `<img src="${UI.esc(UI.avatarSrc(c.avatar))}">` : '';
       return `<label class="share-char-item" data-key="${UI.esc(App.charKey(c))}">
         <span class="avatar sm">${avatar}</span>
-        <span class="share-char-name">${UI.esc(App.displayName(c))}</span>
+        <span class="share-char-name">${UI.esc(charDisplayName(App.charKey(c), App.displayName(c)))}</span>
         <input type="checkbox" value="${UI.esc(App.charKey(c))}">
       </label>`;
     }).join('') || '<div class="share-empty">通讯录里没有更多角色可加了</div>';
@@ -1182,7 +1182,7 @@ const GroupChat = (() => {
       for (const k of keys) {
         await API.addGroupMember(name, k);
         const c = App.charByKey(k);
-        names.push(c ? App.displayName(c) : k);
+        names.push(c ? charDisplayName(App.charKey(c), App.displayName(c)) : k);
       }
       document.getElementById('group-add-modal').style.display = 'none';
       current = await API.getWeChatGroup(name);

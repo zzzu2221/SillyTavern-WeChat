@@ -1,4 +1,4 @@
-/* ============ 朋友圈页 ============ */
+﻿/* ============ 朋友圈页 ============ */
 const Moments = (() => {
   let posts = [];
   let busy = false;
@@ -12,7 +12,7 @@ const Moments = (() => {
 
   function charOptions(sortedChars) {
     return (sortedChars || []).map(c =>
-      `<option value="${UI.esc(App.charKey(c))}">${UI.esc(App.displayName(c))}</option>`
+      `<option value="${UI.esc(App.charKey(c))}">${UI.esc(shownName(c))}</option>`
     ).join('');
   }
   function sortedChars() {
@@ -27,8 +27,67 @@ const Moments = (() => {
     sel.innerHTML = opts;
     if (def && !sel.value) { try { sel.value = def; } catch (e) {} }
   }
+  /** 按 key/名字解析角色：优先通讯录白名单（state.characters），避免取到白名单外同名卡导致头像/名字不一致 */
   function charByKeyOrName(key, name) {
+    const chars = App.state.characters || [];
+    const n = String(name || '').trim();
+    if (chars.length) {
+      if (key) {
+        const byKey = chars.find(c => App.charKey(c) === key);
+        if (byKey) return byKey;
+      }
+      if (n) {
+        const byName = chars.find(c => String(c.name || '').trim() === n);
+        if (byName) return byName;
+      }
+    }
     return App.charByKey(key) || (name ? App.charByName(name) : null);
+  }
+  /** 显示名统一走备注（Detail.shownName），无备注 fallback displayName，并去掉首尾空格 */
+  function shownName(c) {
+    const n = (typeof Detail !== 'undefined' && Detail.shownName) ? Detail.shownName(c) : App.displayName(c);
+    return String(n || '').trim();
+  }
+  /** 评论者显示名：优先按 key/名字从通讯录白名单解析走备注；找不到才用存的名字（去空格） */
+  function commentName(cm) {
+    const c = cm ? charByKeyOrName(cm.key, cm.character) : null;
+    if (c) return shownName(c);
+    return String((cm && cm.character) || '未知').trim();
+  }
+  /** 角色间陌生人判断：任何一方把对方设为「陌生人」→ 朋友圈互不评论。兼容带空格重复卡（key/名字归一化） */
+  function isStrangerTo(aKey, bKey) {
+    if (!aKey || !bKey || aKey === bKey) return false;
+    try {
+      const all = (API.getSettings() || {}).charRelations || {};
+      if ((all[aKey] && all[aKey][bKey] === '陌生人') || (all[bKey] && all[bKey][aKey] === '陌生人')) return true;
+      // 归一化：去首尾空格（重复卡 key 可能只差空格）
+      const na = String(aKey).trim(), nb = String(bKey).trim();
+      if ((all[na] && all[na][nb] === '陌生人') || (all[nb] && all[nb][na] === '陌生人')) return true;
+      // 名字兜底：按角色名 trim 在所有关系里匹配
+      const aChar = charByKeyOrName(aKey, ''), bChar = charByKeyOrName(bKey, '');
+      if (aChar && bChar) {
+        const an = String(aChar.name || '').trim(), bn = String(bChar.name || '').trim();
+        if (an && bn) {
+          for (const k1 of Object.keys(all)) {
+            const c1 = App.charByKey(k1);
+            if (!c1 || String(c1.name || '').trim() !== an) continue;
+            for (const k2 of Object.keys(all[k1] || {})) {
+              const c2 = App.charByKey(k2);
+              if (c2 && String(c2.name || '').trim() === bn && all[k1][k2] === '陌生人') return true;
+            }
+          }
+        }
+      }
+      return false;
+    } catch (e) { return false; }
+  }
+  /** 评论候选：排除发布者自己 + 与发布者互为陌生人的角色 */
+  function commentableChars(post) {
+    return sortedChars().filter(c =>
+      App.charKey(c) !== post.key &&
+      shownName(c).trim() !== String(post.character || '').trim() &&
+      !isStrangerTo(post.key, App.charKey(c))
+    );
   }
   /** 生图是否启用（设置面板「启用生图」开关，关闭时隐藏删除功能与配图入口） */
   function imgEnabled() {
@@ -64,14 +123,14 @@ const Moments = (() => {
     if (!player) return false;
     return p.key === ('__me__' + player.id) || (p.character === player.name && p.key && p.key.indexOf('__me__') === 0);
   }
-  /** 动态发布者信息（角色或 Player） */
+  /** 动态发布者信息（角色或 Player），名字走备注优先，头像按 key 精确解析 */
   function posterInfo(p) {
     const me = (typeof Me !== 'undefined') ? Me.activePlayer() : null;
     if (p.key && p.key.indexOf('__me__') === 0 && me) {
       return { name: me.name || '我', avatar: me.avatar || '' };
     }
     const c = charByKeyOrName(p.key, p.character);
-    return { name: p.character || '未知', avatar: c ? c.avatar : '' };
+    return { name: c ? shownName(c) : String(p.character || '未知').trim(), avatar: c ? c.avatar : '' };
   }
 
   /* ---- 封面 + 时间线 ---- */
@@ -108,7 +167,7 @@ const Moments = (() => {
           ? `<div class="moment-img-wrap"><img src="${UI.esc(p.img)}" class="moment-img" data-src="${UI.esc(p.img)}" loading="lazy"></div>`
           : '';
         const commentsHtml = (p.comments || []).map(cm =>
-          `<div class="comment-item"><span class="cname">${UI.esc(cm.character)}</span>：${UI.esc(commentText(cm.text))}<span class="comment-del" data-idx="${idx}" data-time="${UI.esc(cm.time)}" data-key="${UI.esc(cm.key || '')}">✕</span></div>`
+          `<div class="comment-item"><span class="cname">${UI.esc(commentName(cm))}</span>：${UI.esc(commentText(cm.text))}<span class="comment-del" data-idx="${idx}" data-time="${UI.esc(cm.time)}" data-key="${UI.esc(cm.key || '')}">✕</span></div>`
         ).join('');
         return `
         <div class="moment-card" data-idx="${idx}" data-mid="${UI.esc(p.id)}">
@@ -180,9 +239,9 @@ const Moments = (() => {
   /* ---- 只看某角色发的朋友圈（角色详情页入口） ---- */
   function openFor(character) {
     filterKey = App.charKey(character);
-    filterCharName = App.displayName(character);
+    filterCharName = shownName(character);
     const label = document.getElementById('moments-title-label');
-    if (label) label.textContent = App.displayName(character) + ' 的朋友圈';
+    if (label) label.textContent = shownName(character) + ' 的朋友圈';
     App.showTab('moments');
   }
 
@@ -214,7 +273,7 @@ const Moments = (() => {
     const imgs = (Array.isArray(p.img) ? p.img : (p.img ? [p.img] : [])).filter(Boolean);
     const imgHtml = imgs.map(src => `<img src="${UI.esc(src)}" class="md-img" data-src="${UI.esc(src)}" loading="lazy">`).join('');
     const commentsHtml = (p.comments || []).map(cm =>
-      `<div class="comment-item"><span class="cname">${UI.esc(cm.character)}</span>：${UI.esc(commentText(cm.text))}<span class="comment-del" data-time="${UI.esc(cm.time)}" data-key="${UI.esc(cm.key || '')}">✕</span></div>`
+      `<div class="comment-item"><span class="cname">${UI.esc(commentName(cm))}</span>：${UI.esc(commentText(cm.text))}<span class="comment-del" data-time="${UI.esc(cm.time)}" data-key="${UI.esc(cm.key || '')}">✕</span></div>`
     ).join('');
     body.innerHTML = `
       <div class="moment-detail" data-mid="${UI.esc(p.id)}">
@@ -371,12 +430,12 @@ const Moments = (() => {
     tip.className = 'modal-tip loading';
     try {
       const r = await API.genAutoMoment({
-        character, characterName: App.displayName(c),
+        character, characterName: shownName(c),
         recentChat: await recentChatOf(character),
         hint: '',
         asMe: true,
         meName: player ? (player.name || '我') : '我',
-        meDesc: player ? [player.description, player.signature, player.worldbook].filter(Boolean).join('\n') : '',
+        meDesc: player ? [player.description, player.signature, player.mountedText, player.worldbook].filter(Boolean).join('\n') : '',
       });
       document.getElementById('moment-text').value = r.text ? (window.stripActions ? window.stripActions(r.text) : r.text) : '';
       document.getElementById('moment-imgprompt').value = r.imgPrompt || '';
@@ -408,11 +467,11 @@ const Moments = (() => {
     const n = minN + Math.floor(Math.random() * (maxN - minN + 1));
     const player = (typeof Me !== 'undefined') ? Me.activePlayer() : null;
     const rels = (player && Array.isArray(player.relations)) ? player.relations : [];
-    // 关联角色优先（排除发布者自己）
+    // 关联角色优先（排除发布者自己 + 陌生人）
     const relCandidates = rels
       .map(r => r.key ? App.charByKey(r.key) : null)
-      .filter(c => c && App.charKey(c) !== post.key && App.displayName(c) !== post.character);
-    const others = sortedChars().filter(c => App.charKey(c) !== post.key && App.displayName(c) !== post.character);
+      .filter(c => c && App.charKey(c) !== post.key && shownName(c).trim() !== String(post.character || '').trim() && !isStrangerTo(post.key, App.charKey(c)));
+    const others = commentableChars(post);
     const pool = relCandidates.length ? relCandidates : others;
     if (!pool.length) return;
     const picked = pool.slice().sort(() => Math.random() - 0.5).slice(0, n);
@@ -421,13 +480,13 @@ const Moments = (() => {
     for (const c of picked) {
       try {
         const rel = rels.find(r => r.key === App.charKey(c));
-        const r = await API.aiComment({ momentId: post.id, character: App.charKey(c), characterName: App.displayName(c), momentText: post.text || '', posterName: post.character || '', relation: rel ? (rel.relation || '') : '' });
+        const r = await API.aiComment({ momentId: post.id, character: App.charKey(c), characterName: shownName(c), momentText: post.text || '', posterName: post.character || '', relation: rel ? (rel.relation || '') : '' });
         if (r && r.text) {
           const text = commentText(r.text); // 剥离可能的存储标记前缀 + 括号清洗
-          await API.addComment({ momentId: post.id, character: App.charKey(c), characterName: App.displayName(c), text });
+          await API.addComment({ momentId: post.id, character: App.charKey(c), characterName: shownName(c), text });
           okCount++;
           // 本地数据 + 局部渲染：一条一条带随机间隔弹出（仿聊天逐条）
-          const cm = { character: App.displayName(c), text, time: new Date().toISOString(), key: App.charKey(c) };
+          const cm = { character: shownName(c), text, time: new Date().toISOString(), key: App.charKey(c) };
           (post.comments = post.comments || []).push(cm);
           appendCommentEl(post.id, cm);
           await sleep(900 + Math.random() * 1100);
@@ -449,7 +508,7 @@ const Moments = (() => {
     if (!cbox) return;
     const el = document.createElement('div');
     el.className = 'comment-item';
-    el.innerHTML = `<span class="cname">${UI.esc(cm.character)}</span>：${UI.esc(commentText(cm.text))}<span class="comment-del" data-time="${UI.esc(cm.time)}" data-key="${UI.esc(cm.key || '')}">✕</span>`;
+    el.innerHTML = `<span class="cname">${UI.esc(commentName(cm))}</span>：${UI.esc(commentText(cm.text))}<span class="comment-del" data-time="${UI.esc(cm.time)}" data-key="${UI.esc(cm.key || '')}">✕</span>`;
     cbox.appendChild(el);
     const del = el.querySelector('.comment-del');
     del.addEventListener('click', async (ev) => {
@@ -472,12 +531,13 @@ const Moments = (() => {
   let sharePayloadCard = null;
   function openShareModal(post) {
     const mine = isMePost(post);
-    const text = (mine ? '我发了条朋友圈：' : (post.character ? post.character + ' 发了条朋友圈：' : '')) + (post.text || '（图片朋友圈）');
+    const poster = posterInfo(post).name || '未知';
+    const text = (mine ? '我发了条朋友圈：' : (poster + ' 发了条朋友圈：')) + (post.text || '（图片朋友圈）');
     const card = {
       type: 'moment',
       id: post.id,
       title: (post.text || '图片动态').slice(0, 60),
-      source: (mine ? '我' : (post.character || '')) + ' 的朋友圈',
+      source: (mine ? '我' : poster) + ' 的朋友圈',
       thumb: (Array.isArray(post.img) && post.img.length) ? post.img[0] : '',
     };
     shareToChat(text, card);
@@ -493,7 +553,7 @@ const Moments = (() => {
       const avatar = UI.avatarSrc(c.avatar) ? `<img src="${UI.esc(UI.avatarSrc(c.avatar))}">` : '';
       return `<label class="share-char-item" data-key="${UI.esc(App.charKey(c))}">
         <span class="avatar sm">${avatar}</span>
-        <span class="share-char-name">${UI.esc(App.displayName(c))}</span>
+        <span class="share-char-name">${UI.esc(shownName(c))}</span>
         <input type="checkbox" value="${UI.esc(App.charKey(c))}">
       </label>`;
     }).join('');
@@ -599,12 +659,12 @@ const Moments = (() => {
     commentTarget = post;
     const mask = document.getElementById('comment-modal');
     const sel = document.getElementById('comment-char');
-    sel.innerHTML = charOptions(sortedChars());
+    const commentables = commentableChars(post);
+    sel.innerHTML = charOptions(commentables.length ? commentables : sortedChars());
     document.getElementById('comment-text').value = '';
     document.getElementById('comment-tip').textContent = '';
     setCommentWho('char');
-    const others = sortedChars().filter(c => App.charKey(c) !== post.key && App.displayName(c) !== post.character);
-    if (others.length) sel.value = App.charKey(others[0]);
+    if (commentables.length) sel.value = App.charKey(commentables[0]);
     else if (sel.options.length) sel.value = sel.options[0].value;
     mask.style.display = 'flex';
   }
@@ -636,7 +696,7 @@ const Moments = (() => {
       character = document.getElementById('comment-char').value;
       const c = App.charByKey(character);
       if (!c) { document.getElementById('comment-tip').textContent = '请选择角色'; return; }
-      characterName = App.displayName(c);
+      characterName = shownName(c);
     }
     busy = true;
     const tip = document.getElementById('comment-tip');
@@ -674,7 +734,7 @@ const Moments = (() => {
       character = document.getElementById('comment-char').value;
       const c = App.charByKey(character);
       if (!c) return;
-      characterName = App.displayName(c);
+      characterName = shownName(c);
     }
     busy = true;
     const tip = document.getElementById('comment-tip');
@@ -796,7 +856,7 @@ const Moments = (() => {
       }
       let meDesc = '';
       try { const p = (typeof Me !== 'undefined') ? Me.activePlayer() : null; if (p) meDesc = [p.description, p.signature, p.worldbook].filter(Boolean).join('\n'); } catch (e) {}
-      const r = await API.genAutoMoment({ character, characterName: App.displayName(c), recentChat, hint, imgTag, groupChat, groupName, meDesc });
+      const r = await API.genAutoMoment({ character, characterName: shownName(c), recentChat, hint, imgTag, groupChat, groupName, meDesc });
       document.getElementById('aim-text').value = r.text ? (window.stripActions ? window.stripActions(r.text) : r.text) : '';
       document.getElementById('aim-img').value = r.imgPrompt || '';
       setAiTip('草稿已生成，可修改后发布', '');
@@ -812,7 +872,7 @@ const Moments = (() => {
             const f = document.getElementById('aim-file').files && document.getElementById('aim-file').files[0];
             if (f) imgData = await readFileData(f);
           }
-          await doPublish(character, App.displayName(c), r.text, img, document.getElementById('aim-preset').value, true, imgData);
+          await doPublish(character, shownName(c), r.text, img, document.getElementById('aim-preset').value, true, imgData);
         } catch (e) {
           setAiTip('发布失败：' + e.message);
         }
@@ -852,7 +912,7 @@ const Moments = (() => {
     if (!c || !text) { setAiTip('请选择角色并先生成/填写文案'); return; }
     busy = true;
     try {
-      await doPublish(character, App.displayName(c), text, imagePrompt, preset, false, imgData);
+      await doPublish(character, shownName(c), text, imagePrompt, preset, false, imgData);
     } catch (e) {
       setAiTip('发布失败：' + e.message);
     }
@@ -919,5 +979,5 @@ const Moments = (() => {
     if (detBack) detBack.addEventListener('click', backFromDetail);
   }
 
-  return { render, load, init, openFor, openPostById, openPostDetail, shareToChat };
+  return { render, load, init, openFor, openPostById, openPostDetail, shareToChat, recentChatOf, autoCommentMoment };
 })();

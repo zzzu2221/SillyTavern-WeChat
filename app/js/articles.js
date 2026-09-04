@@ -142,7 +142,7 @@ const Articles = (() => {
     try {
       const r = await API.genArticle({
         hint: hint,
-        meDesc: player ? [player.description, player.signature, player.worldbook].filter(Boolean).join('\n') : '',
+        meDesc: player ? [player.description, player.signature, player.mountedText, player.worldbook].filter(Boolean).join('\n') : '',
       });
       document.getElementById('art-author').value = r.author || '';
       document.getElementById('art-title').value = r.title || '';

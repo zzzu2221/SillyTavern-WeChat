@@ -221,7 +221,7 @@
         <label>选择图片</label>
         <div class="upload-pick">
           <button type="button" class="btn-plain" id="moment-upload-btn">＋ 选择图片</button>
-          <input type="file" id="moment-file" accept="image/*" style="display:none">
+          <input type="file" id="moment-file" accept="image/*" style="position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0">
           <img id="moment-file-preview" class="upload-preview" style="display:none">
         </div>
       </div>
@@ -302,7 +302,7 @@
         <label>选择图片（人工编辑用）</label>
         <div class="upload-pick">
           <button type="button" class="btn-plain" id="aim-upload-btn">＋ 选择图片</button>
-          <input type="file" id="aim-file" accept="image/*" style="display:none">
+          <input type="file" id="aim-file" accept="image/*" style="position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0">
           <img id="aim-file-preview" class="upload-preview" style="display:none">
         </div>
       </div>
@@ -324,7 +324,7 @@
         <div class="profile-avatar-pick" id="profile-avatar-pick"></div>
         <div class="upload-pick">
           <button type="button" class="btn-plain" id="profile-avatar-upload-btn">＋ 本地上传头像</button>
-          <input type="file" id="profile-avatar-file" accept="image/*" style="display:none">
+          <input type="file" id="profile-avatar-file" accept="image/*" style="position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0">
         </div>
       </div>
       <div class="modal-field"><label>名字</label><input id="profile-name" placeholder="我的名字"></div>
@@ -337,7 +337,7 @@
         <input id="profile-cover" placeholder="图片地址，或下方本地上传">
         <div class="upload-pick">
           <button type="button" class="btn-plain" id="profile-cover-upload-btn">＋ 本地上传封面</button>
-          <input type="file" id="profile-cover-file" accept="image/*" style="display:none">
+          <input type="file" id="profile-cover-file" accept="image/*" style="position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0">
           <img id="profile-cover-preview" class="upload-preview upload-preview-cover" style="display:none">
         </div>
       </div>
@@ -358,13 +358,13 @@
         <div class="profile-avatar-pick" id="acct-avatar-pick"></div>
         <div class="upload-pick">
           <button type="button" class="btn-plain" id="acct-avatar-upload-btn">＋ 本地上传头像</button>
-          <input type="file" id="acct-avatar-file" accept="image/*" style="display:none">
+          <input type="file" id="acct-avatar-file" accept="image/*" style="position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0">
         </div>
       </div>
       <div class="modal-field"><label>朋友圈封面</label>
         <div class="upload-pick">
           <button type="button" class="btn-plain" id="acct-cover-upload-btn">＋ 本地上传封面</button>
-          <input type="file" id="acct-cover-file" accept="image/*" style="display:none">
+          <input type="file" id="acct-cover-file" accept="image/*" style="position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0">
           <img id="acct-cover-preview" class="upload-preview upload-preview-cover" style="display:none">
         </div>
       </div>
@@ -378,9 +378,11 @@
       <div class="modal-field"><label>世界书 / 我的设定（可挂多个世界书，像酒馆本体那样逐个勾选条目）</label>
         <div class="wb-pick">
           <button type="button" class="btn-plain" id="acct-wb-add">＋ 挂载世界书</button>
+          <button type="button" class="btn-plain" id="acct-wb-gen">⚡ 自动生成角色人设世界书</button>
           <button type="button" class="btn-plain" id="acct-wb-clear" style="display:none">全部移除</button>
         </div>
         <div class="wb-mounted" id="acct-wb-mounted"></div>
+        <div class="wb-gen-hint">自动把「通讯录」里的角色卡人设生成一本「WeChat-角色人设」世界书并挂到本账号，群聊里聊到谁就按关键词激活谁，像酒馆本体一样按需注入。</div>
         <textarea id="acct-wb" rows="3" placeholder="自动由挂载的世界书生成，也可手写补充：例如 我是五条悟的女友…"></textarea>
       </div>
       <div class="modal-actions">
@@ -568,18 +570,19 @@
   </div>
 </div>
 
-<script src="js/api.js?v=2026090324"></script>
-<script src="js/store.js?v=2026090376"></script>
-<script src="js/ui.js?v=2026090376"></script>
-<script src="js/app.js?v=2026090376"></script>
-<script src="js/contacts.js?v=2026090376"></script>
-<script src="js/chatlist.js?v=2026090376"></script>
-<script src="js/chat.js?v=2026090376"></script>
-<script src="js/detail.js?v=2026090376"></script>
-<script src="js/moments.js?v=2026090376"></script>
-<script src="js/articles.js?v=2026090376"></script>
-<script src="js/friends.js?v=2026090376"></script>
-<script src="js/me.js?v=2026090376"></script>
-<script src="js/groupchat.js?v=2026090376"></script>
+<script src="js/api.js?v=2026090388"></script>
+<script src="js/store.js?v=2026090388"></script>
+<script src="js/ui.js?v=2026090388"></script>
+<script src="js/app.js?v=2026090388"></script>
+<script src="js/contacts.js?v=2026090388"></script>
+<script src="js/chatlist.js?v=2026090388"></script>
+<script src="js/chat.js?v=2026090388"></script>
+<script src="js/detail.js?v=2026090388"></script>
+<script src="js/moments.js?v=2026090388"></script>
+<script src="js/articles.js?v=2026090388"></script>
+<script src="js/friends.js?v=2026090388"></script>
+<script src="js/me.js?v=2026090388"></script>
+<script src="js/groupchat.js?v=2026090388"></script>
+<script src="js/active.js?v=2026090388"></script>
 </body>
 </html>

@@ -59,10 +59,27 @@ const API = (() => {
     deleteArticle: (id) => requireBridge().deleteArticle(id),
     genArticle: (data) => requireBridge().genArticle(data),
 
-    /* --- 群聊 --- */
-    listWeChatGroups: () => requireBridge().listWeChatGroups(),
+    /* --- 群聊（按玩家账号隔离：切人设=切号，只显示本账号的群；无 ownerId 的旧群自动归属当前账号） --- */
+    listWeChatGroups: async () => {
+      const list = await requireBridge().listWeChatGroups();
+      try {
+        const p = (typeof Me !== 'undefined') ? Me.activePlayer() : null;
+        const myId = p && p.id ? String(p.id) : '';
+        if (!myId) return list || [];
+        // 归属：旧群无 ownerId → 归当前账号（避免切号后群聊串到其他设定）
+        const toClaim = (list || []).filter(g => !g.ownerId);
+        if (toClaim.length) {
+          for (const g of toClaim) { try { await requireBridge().updateWeChatGroup(g.name, { ownerId: myId }); } catch (e) {} }
+        }
+        return (list || []).filter(g => String(g.ownerId || '') === myId);
+      } catch (e) { return list || []; }
+    },
     getWeChatGroup: (name) => requireBridge().getWeChatGroup(name),
-    createWeChatGroup: (name, memberKeys, ownerKey) => requireBridge().createWeChatGroup(name, memberKeys, ownerKey),
+    createWeChatGroup: (name, memberKeys, ownerKey) => {
+      let ownerId = '';
+      try { const p = (typeof Me !== 'undefined') ? Me.activePlayer() : null; ownerId = p && p.id ? String(p.id) : ''; } catch (e) {}
+      return requireBridge().createWeChatGroup(name, memberKeys, ownerKey, ownerId);
+    },
     deleteWeChatGroup: (name) => requireBridge().deleteWeChatGroup(name),
     saveWeChatMessage: (name, msg) => requireBridge().saveWeChatMessage(name, msg),
     genGroupReply: (data) => requireBridge().genGroupReply(data),
@@ -88,5 +105,10 @@ const API = (() => {
     listWorldInfos: () => requireBridge().listWorldInfos(),
     getWorldInfoText: (id) => requireBridge().getWorldInfoText(id),
     getWorldInfoEntries: (id) => requireBridge().getWorldInfoEntries(id),
+    genRoleWorldbook: () => requireBridge().genRoleWorldbook(),
+
+    /* --- 账号整体备份（角色卡 + 世界书 + 聊天 + 配置，不含 API Key） --- */
+    exportAccount: () => requireBridge().exportAccount(),
+    importAccount: (payload) => requireBridge().importAccount(payload),
   };
 })();

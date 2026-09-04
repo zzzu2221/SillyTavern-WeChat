@@ -63,7 +63,7 @@ const ChatList = (() => {
           <div class="avatar-wrap">${avatar ? `<div class="avatar">${avatar}</div>` : `<div class="avatar"></div>`}${badge}</div>
           <div class="list-main">
             <div class="list-title">${UI.esc((typeof Detail !== 'undefined' && Detail.shownName) ? Detail.shownName(c) : App.displayName(c))}</div>
-            <div class="list-sub">${UI.esc(window.stripActions ? window.stripActions(s.preview || '') : (s.preview || '开始聊天吧'))}</div>
+            <div class="list-sub">${UI.esc(s.typing ? '正在输入…' : (window.stripActions ? window.stripActions(s.preview || '') : (s.preview || '开始聊天吧')))}</div>
           </div>
           <div class="list-meta">${UI.fmtTime(s.updatedAt)}</div>
         </div>`;
@@ -128,7 +128,7 @@ const ChatList = (() => {
         if (typeof GroupChat !== 'undefined' && GroupChat.openCreateModal) GroupChat.openCreateModal();
       });
       list.innerHTML = chars.slice().sort((a,b)=>(a.name||'').localeCompare(b.name||'','zh')).map(c =>
-        `<div class="list-item picker-item" data-key="${UI.esc(App.charKey(c))}"><div class="avatar sm">${UI.avatarSrc(c.avatar)?`<img src="${UI.esc(UI.avatarSrc(c.avatar))}">`:''}</div><div class="list-main"><div class="list-title">${UI.esc(App.displayName(c))}</div></div></div>`
+        `<div class="list-item picker-item" data-key="${UI.esc(App.charKey(c))}"><div class="avatar sm">${UI.avatarSrc(c.avatar)?`<img src="${UI.esc(UI.avatarSrc(c.avatar))}">`:''}</div><div class="list-main"><div class="list-title">${UI.esc((typeof Detail !== 'undefined' && Detail.shownName) ? Detail.shownName(c) : App.displayName(c))}</div></div></div>`
       ).join('');
       card.querySelectorAll('.picker-item').forEach(el => {
         el.addEventListener('click', async () => {

@@ -50,7 +50,7 @@ const Me = (() => {
     const personas = await loadPersonas();
     const opts = [{ label: '默认', av: '' }];
     personas.forEach(p => opts.push({ label: '用户设定·' + (p.name || '未命名'), av: p.avatar, group: '用户设定' }));
-    (App.state.allCharacters || []).forEach(c => opts.push({ label: App.displayName(c), av: c.avatar }));
+    (App.state.allCharacters || []).forEach(c => opts.push({ label: ((typeof Detail !== 'undefined' && Detail.shownName) ? Detail.shownName(c) : App.displayName(c)), av: c.avatar }));
     box.innerHTML = '';
     let picked = current;
     opts.forEach(o => {
@@ -122,6 +122,7 @@ const Me = (() => {
         <div class="me-menu-item" id="me-menu-moments"><span class="me-menu-icon">🌐</span><span>朋友圈</span><span class="me-chevron">›</span></div>
         <div class="me-menu-item" id="me-menu-account"><span class="me-menu-icon">👤</span><span>账号管理（切换 / 关系 / 世界书）</span><span class="me-chevron">›</span></div>
         <div class="me-menu-item" id="me-menu-settings"><span class="me-menu-icon">⚙️</span><span>微信设置（生图 / 聊天 / 悬浮窗）</span><span class="me-chevron">›</span></div>
+        <div class="me-menu-item" id="me-menu-io"><span class="me-menu-icon">📦</span><span>数据备份（导出 / 导入）</span><span class="me-chevron">›</span></div>
       </div>
       <div class="me-card">
         <div class="me-row"><span class="k">酒馆地址</span><span class="v">${UI.esc(cfg.stUrl || '未连接')}</span></div>
@@ -136,6 +137,7 @@ const Me = (() => {
     document.getElementById('me-menu-settings').addEventListener('click', () => {
       try { API.openSettings(); } catch (e) { UI.toast(e.message); }
     });
+    document.getElementById('me-menu-io').addEventListener('click', openIoModal);
     document.getElementById('me-refresh').addEventListener('click', async () => {
       UI.toast('刷新中…');
       try {
@@ -145,6 +147,77 @@ const Me = (() => {
         render();
       } catch (e) { UI.toast('刷新失败：' + e.message); }
     });
+  }
+
+  /* ---------- 数据备份（账号整体导出 / 导入） ---------- */
+  function openIoModal() {
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask';
+    const card = document.createElement('div');
+    card.className = 'modal-card';
+    card.innerHTML = `<div class="modal-title">数据备份</div>
+      <div class="io-tip">导出<strong>当前账号</strong>（含角色卡、勾选的世界书、聊天记录、账号设置 / 关系 / 备注 / 白名单）。<br>换电脑：装好微信插件后导入此文件，即还原整个账号（同名角色卡 / 世界书会被覆盖）。<br>生图与聊天 <strong>API Key 不会导出</strong>，导入时保留本机 Key。</div>
+      <div class="io-actions">
+        <button type="button" class="btn-plain wb-mini" id="io-export">📤 导出当前账号</button>
+        <button type="button" class="btn-plain wb-mini" id="io-import">📥 导入账号备份</button>
+      </div>
+      <input type="file" id="io-file" accept="application/json,.json" style="display:none">
+      <div class="io-note" style="margin-top:10px;font-size:12px;color:#888">导出较大（含角色卡图片与聊天记录），请耐心等待。</div>`;
+    card.querySelector('#io-export').addEventListener('click', exportData);
+    card.querySelector('#io-import').addEventListener('click', () => card.querySelector('#io-file').click());
+    card.querySelector('#io-file').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) importData(f); e.target.value = ''; });
+    mask.appendChild(card);
+    mask.addEventListener('click', (e) => { if (e.target === mask) mask.remove(); });
+    document.body.appendChild(mask);
+  }
+  function pad2(n) { return String(n).padStart(2, '0'); }
+  async function exportData() {
+    try {
+      const payload = await API.exportAccount();
+      const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const d = new Date();
+      a.href = url; a.download = `wechat-st-账号备份-${payload.accountId || 'me'}-${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 3000);
+      UI.toast(`已导出：角色卡 ${(payload.characters || []).length} / 世界书 ${(payload.worlds || []).length} / 聊天 ${(payload.chats || []).length}`);
+    } catch (e) { UI.toast('导出失败：' + e.message); }
+  }
+  async function importData(file) {
+    let obj = null;
+    try { obj = JSON.parse(await file.text()); } catch (e) { UI.toast('文件格式错误'); return; }
+    if (!obj || obj.app !== 'SillyTavern-WeChat' || obj.kind !== 'account-backup' || !obj.config) {
+      UI.toast('不是本插件的账号备份文件'); return;
+    }
+    if (obj.exportVersion !== 1) { UI.toast('备份版本不兼容，请用同版本导出'); return; }
+    const nChar = (obj.characters || []).length, nWorld = (obj.worlds || []).length, nChat = (obj.chats || []).length;
+    const accName = (obj.config.players && obj.config.players[0] && obj.config.players[0].name) || obj.accountId || '账号';
+    const ok = await UI.confirm(`导入账号「${accName}」：角色卡 ×${nChar}、世界书 ×${nWorld}、聊天记录 ×${nChat}。同名角色卡 / 世界书会被覆盖，确定继续吗？`, { okText: '导入' });
+    if (!ok) return;
+    try {
+      // 1) 角色卡 / 世界书 / 聊天写回酒馆
+      const r = await API.importAccount(obj);
+      // 2) 配置写 settings（players 合并：同 id 覆盖、其他账号保留；生图 Key 保留本机）
+      const cfg = JSON.parse(JSON.stringify(obj.config || {}));
+      const cur = API.getSettings() || {};
+      if (cfg.image && !cfg.image.apiKey && cur.image) cfg.image = Object.assign({}, cfg.image, { apiKey: cur.image.apiKey });
+      const curPlayers = Array.isArray(cur.players) ? cur.players : [];
+      if (Array.isArray(cfg.players) && cfg.players[0]) {
+        const mine = curPlayers.find(p => p.id === cfg.players[0].id);
+        cfg.players = mine ? curPlayers.map(p => p.id === cfg.players[0].id ? cfg.players[0] : p) : curPlayers.concat(cfg.players);
+      } else if (curPlayers.length) {
+        cfg.players = curPlayers;
+      }
+      API.saveAppSettings(cfg);
+      if (typeof Store !== 'undefined' && Store.syncFromServer) Store.syncFromServer();
+      await App.loadConfig();
+      await App.refreshCharacters();
+      if (typeof Contacts !== 'undefined' && Contacts.render) Contacts.render();
+      if (typeof ChatList !== 'undefined' && ChatList.render) ChatList.render();
+      const skip = (r.skipped || []).length;
+      UI.toast(`导入完成：角色卡 ${r.characters.length} / 世界书 ${r.worlds.length} / 聊天 ${r.chats.length}` + (skip ? `（跳过 ${skip} 项）` : ''));
+    } catch (e) { UI.toast('导入失败：' + e.message); }
   }
 
   /* ---------- 个人信息编辑 ---------- */
@@ -431,6 +504,24 @@ const Me = (() => {
     acctWbSel = Object.assign({}, p.wbSel || {});
     renderWbMounted();
     document.getElementById('acct-wb-add').onclick = openWbPick;
+    document.getElementById('acct-wb-gen').onclick = async () => {
+      const btn = document.getElementById('acct-wb-gen');
+      const old = btn.textContent;
+      btn.disabled = true; btn.textContent = '生成中…';
+      try {
+        const r = await API.genRoleWorldbook();
+        // 成功：把生成的世界书自动挂到当前编辑账号
+        if (r && r.fileId && !acctWbSel[r.fileId]) {
+          acctWbSel[r.fileId] = { name: r.fileId, uids: ['*'] };
+          renderWbMounted();
+        }
+        UI.toast(`已生成「${r.fileId}」${r.count} 条角色人设并挂载`);
+      } catch (e) {
+        UI.toast('生成失败：' + (e.message || e));
+      } finally {
+        btn.disabled = false; btn.textContent = old;
+      }
+    };
     const wbMountedBox = document.getElementById('acct-wb-mounted');
     wbMountedBox.onclick = (e) => {
       const btn = e.target.closest('button[data-act]');
@@ -452,13 +543,15 @@ const Me = (() => {
       const description = document.getElementById('acct-desc').value.trim();
       const manualWb = document.getElementById('acct-wb').value.trim();
       const wbSel = acctWbSel;
+      // 勾选世界书的聚合文本单独存 mountedText（请求时注入），不再写进文本框/worldbook，
+      // 避免"勾选内容自动灌进文本框"导致编辑区被污染、保存时重复累加膨胀
       const mountedText = await buildWorldbookText(wbSel);
-      const worldbook = [mountedText, manualWb].filter(Boolean).join('\n');
+      const worldbook = manualWb;
       const relations = collectRelations();
       const avatar = acctPicker.get();
       const coverData = document.getElementById('acct-cover-file').dataset.value;
       const cover = coverData || p.cover || '';
-      const merged = { name, signature, description, worldbook, wbSel, relations, avatar, cover };
+      const merged = { name, signature, description, worldbook, mountedText, wbSel, relations, avatar, cover };
       if (isNew) {
         list.push(Object.assign({}, p, merged));
         savePlayers(list, p.id);
@@ -542,7 +635,7 @@ const Me = (() => {
         const tg = tagSel.value;
         const filtered = chars.filter(c => {
           if (used.has(App.charKey(c))) return false;
-          if (q && App.displayName(c).toLowerCase().indexOf(q) < 0) return false;
+          if (q && ((typeof Detail !== 'undefined' && Detail.shownName) ? Detail.shownName(c) : App.displayName(c)).toLowerCase().indexOf(q) < 0) return false;
           if (tg && (c.tag || []).indexOf(tg) < 0) return false;
           return true;
         });
@@ -555,7 +648,7 @@ const Me = (() => {
           return `<div class="rp-item${on ? ' sel' : ''}" data-key="${UI.esc(k)}">
             <span class="rp-check${on ? ' on' : ''}"></span>
             <div class="avatar">${avatar}</div>
-            <div class="rp-main"><div class="rp-name">${UI.esc(App.displayName(c))}</div><div class="rp-tags">${tagsHtml || '<span class="rp-tag-none">无 tag</span>'}</div></div>
+            <div class="rp-main"><div class="rp-name">${UI.esc((typeof Detail !== 'undefined' && Detail.shownName) ? Detail.shownName(c) : App.displayName(c))}</div><div class="rp-tags">${tagsHtml || '<span class="rp-tag-none">无 tag</span>'}</div></div>
           </div>`;
         }).join('');
         list.querySelectorAll('.rp-item').forEach(el => {

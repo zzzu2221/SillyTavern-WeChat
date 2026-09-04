@@ -1064,6 +1064,257 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       return { id: e.uid, comment: e.comment || '', content: e.content || '', enabled: e.disable !== true && e.enabled !== false };
     });
   }
+  /** 群聊用：增强读取世界书条目（带常开标记 + 关键词），供按需激活注入 */
+  async function getWorldInfoForGroup(fileId) {
+    if (!fileId) return [];
+    var data = await st('POST', '/api/worldinfo/get', { name: fileId });
+    var raw = (data && data.entries) || [];
+    var entries = Array.isArray(raw) ? raw : Object.keys(raw).map(function (k) { return raw[k]; });
+    return entries.map(function (e) {
+      return {
+        uid: e.uid,
+        comment: e.comment || '',
+        content: e.content || '',
+        enabled: e.disable !== true && e.enabled !== false,
+        constant: !!e.constant,
+        key: Array.isArray(e.key) ? e.key.map(String) : [],
+      };
+    });
+  }
+
+  /* ---------------- 账号整体备份（角色卡 + 世界书 + 聊天 + 配置，按当前账号） ---------------- */
+  /** multipart 请求（FormData + CSRF 头；酒馆全局 multer 只认文件字段名 'avatar'，且不设 Content-Type 让浏览器自动生成 boundary） */
+  async function stForm(path, formData) {
+    var h = {};
+    try {
+      var c = ctx();
+      if (c && c.getRequestHeaders) {
+        try { h = c.getRequestHeaders({ omitContentType: true }); } catch (e) { h = c.getRequestHeaders(); delete h['Content-Type']; }
+      }
+    } catch (e) {}
+    var res = await fetch(path, { method: 'POST', headers: h, body: formData });
+    var text = await res.text();
+    var data; try { data = JSON.parse(text); } catch (e) { data = text; }
+    if (!res.ok) { var err = new Error(path + ' -> ' + res.status); err.status = res.status; err.data = data; throw err; }
+    return data;
+  }
+  function bufferToBase64(buf) {
+    var bytes = new Uint8Array(buf);
+    var bin = '';
+    for (var i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  }
+  function base64ToBlob(b64, type) {
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: type || 'application/octet-stream' });
+  }
+  /** 当前账号通讯录白名单角色（与前端 effectiveWhitelist 对齐：手动白名单 ∪ tag 自动 − 排除） */
+  function accountWhitelistChars(chars, s) {
+    var autoTags = String(s.autoWhitelistTag || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+    var excluded = new Set((Array.isArray(s.whitelistExcluded) ? s.whitelistExcluded : []).map(String));
+    var wl = Array.isArray(s.whitelist) ? s.whitelist.map(String) : null; // null = 全部
+    return (chars || []).filter(function (c) {
+      var k = charKeyOf(c);
+      if (excluded.has(k) || excluded.has(c.name)) return false;
+      if (wl === null && autoTags.length === 0) return false; // 无任何白名单规则 → 不导出（避免全量）
+      var inWl = (wl === null) || wl.indexOf(k) >= 0 || wl.indexOf(c.name) >= 0;
+      var inTag = autoTags.length === 0 || (Array.isArray(c.tag) && c.tag.some(function (t) { return autoTags.indexOf(String(t)) >= 0; }));
+      return inWl || inTag;
+    });
+  }
+  /** 导出当前账号完整备份（不含生图 / 聊天 API Key） */
+  async function exportAccountBackup() {
+    var s = getSettings();
+    var activeId = s.activePlayerId;
+    var player = (Array.isArray(s.players) ? s.players : []).find(function (p) { return p.id === activeId; }) || null;
+    var chars = await listCharacters(true);
+    var wlChars = accountWhitelistChars(chars, s);
+    var characters = [], worlds = [], chats = [];
+    // 1) 角色卡（通讯录白名单角色 → 完整 png base64）
+    for (var i = 0; i < wlChars.length; i++) {
+      var c = wlChars[i];
+      var png = '';
+      var url = c.avatar_file && c.avatar_file !== 'none' ? String(c.avatar_file) : '';
+      if (url && !url.startsWith('data:')) {
+        try {
+          var res = await fetch('/characters/' + encodeURIComponent(url));
+          if (res.ok) { var buf = await res.arrayBuffer(); png = bufferToBase64(buf); }
+        } catch (e) {}
+      }
+      characters.push({ key: c.key, name: c.name, avatar: c.avatar_file, png: png });
+    }
+    // 2) 世界书（当前账号勾选的世界书整本）
+    var wbSel = (player && player.wbSel) || {};
+    var wbIds = Object.keys(wbSel);
+    for (var j = 0; j < wbIds.length; j++) {
+      var fid = wbIds[j];
+      try {
+        var data = await st('POST', '/api/worldinfo/get', { name: fid });
+        worlds.push({ fileId: fid, name: (wbSel[fid] && wbSel[fid].name) || fid, data: data });
+      } catch (e) {}
+    }
+    // 3) 聊天（sessions 中属于当前账号白名单角色的会话）
+    var sessionsMap = s.sessions || {};
+    var buckets = Object.keys(sessionsMap);
+    var keySet = new Set(wlChars.map(function (x) { return x.key; }));
+    for (var m = 0; m < buckets.length; m++) {
+      var bk = buckets[m];
+      if (!keySet.has(bk)) continue;
+      var char = null;
+      for (var q = 0; q < wlChars.length; q++) { if (wlChars[q].key === bk) { char = wlChars[q]; break; } }
+      if (!char) continue;
+      var list = sessionsMap[bk] || [];
+      for (var n = 0; n < list.length; n++) {
+        var sess = list[n];
+        if (!sess || !sess.file) continue;
+        try {
+          var cdata = await st('POST', '/api/chats/get', { avatar_url: char.avatar_file, file_name: sess.file });
+          if (Array.isArray(cdata) && cdata.length) chats.push({ key: bk, avatar_url: char.avatar_file, file_name: sess.file, title: sess.title || '', chat: cdata });
+        } catch (e) {}
+      }
+    }
+    // 4) 配置（按当前账号裁剪，剔除密钥）
+    var cfg = {};
+    cfg.activePlayerId = activeId;
+    cfg.players = player ? [JSON.parse(JSON.stringify(player))] : [];
+    ['whitelist', 'whitelistExcluded', 'autoWhitelistTag', 'charNotes', 'charRelations', 'momentsGroupId', 'articlesGroupId', 'enableArticle', 'imageEnabled', 'timezone', 'groupActive', 'showFab'].forEach(function (k) { if (s[k] !== undefined) cfg[k] = JSON.parse(JSON.stringify(s[k])); });
+    if (s.chat) cfg.chat = JSON.parse(JSON.stringify(s.chat));
+    if (s.image) { var im = JSON.parse(JSON.stringify(s.image)); delete im.apiKey; cfg.image = im; }
+    var sessCfg = {};
+    buckets.forEach(function (bk) { if (keySet.has(bk)) sessCfg[bk] = sessionsMap[bk]; });
+    cfg.sessions = sessCfg;
+    cfg.current = (s.current && keySet.has(s.current.charKey)) ? JSON.parse(JSON.stringify(s.current)) : null;
+    return {
+      app: 'SillyTavern-WeChat',
+      kind: 'account-backup',
+      exportVersion: 1,
+      exportedAt: new Date().toISOString(),
+      accountId: activeId,
+      config: cfg,
+      characters: characters,
+      worlds: worlds,
+      chats: chats,
+    };
+  }
+  /** 导入账号备份：角色卡 / 世界书 / 聊天写回酒馆（配置由前端写 settings） */
+  async function importAccountBackup(payload) {
+    var result = { characters: [], worlds: [], chats: [], skipped: [] };
+    var push = function (arr, name) { if (arr.length < 300) arr.push(name); };
+    var cl = (payload && Array.isArray(payload.characters)) ? payload.characters : [];
+    for (var i = 0; i < cl.length; i++) {
+      var c = cl[i];
+      if (!c || !c.png) { push(result.skipped, '角色:' + (c && c.name || '?')); continue; }
+      try {
+        var fd = new FormData();
+        fd.append('avatar', base64ToBlob(c.png, 'image/png'), c.avatar || (c.name + '.png'));
+        fd.append('file_type', 'png');
+        await stForm('/api/characters/import', fd);
+        push(result.characters, c.name);
+      } catch (e) { push(result.skipped, '角色:' + c.name); }
+    }
+    var wl2 = (payload && Array.isArray(payload.worlds)) ? payload.worlds : [];
+    for (var j = 0; j < wl2.length; j++) {
+      var w = wl2[j];
+      if (!w || !w.data) { push(result.skipped, '世界书:' + (w && w.name || '?')); continue; }
+      try {
+        var fd2 = new FormData();
+        fd2.append('avatar', new Blob([JSON.stringify(w.data)], { type: 'application/json' }), (w.name || w.fileId || 'world') + '.json');
+        await stForm('/api/worldinfo/import', fd2);
+        push(result.worlds, w.name);
+      } catch (e) { push(result.skipped, '世界书:' + w.name); }
+    }
+    var chl = (payload && Array.isArray(payload.chats)) ? payload.chats : [];
+    for (var m = 0; m < chl.length; m++) {
+      var ch = chl[m];
+      if (!ch || !ch.avatar_url || !ch.file_name || !Array.isArray(ch.chat)) { push(result.skipped, '聊天:' + (ch && ch.file_name || '?')); continue; }
+      try {
+        await st('POST', '/api/chats/save', { avatar_url: ch.avatar_url, file_name: ch.file_name, chat: ch.chat, force: true });
+        push(result.chats, ch.file_name);
+      } catch (e) { push(result.skipped, '聊天:' + ch.file_name); }
+    }
+    return result;
+  }
+
+  /* ---------------- 角色人设世界书（自动生成，供群聊按关键词激活） ---------------- */
+  /** 通讯录角色 = 手动白名单 ∪ autoWhitelistTag 命中 − whitelistExcluded（与前端 effectiveWhitelist 对齐） */
+  function whitelistCharsForGen(chars) {
+    var s = getSettings();
+    var autoTags = String(s.autoWhitelistTag || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+    var excluded = new Set((Array.isArray(s.whitelistExcluded) ? s.whitelistExcluded : []).map(String));
+    var wl = Array.isArray(s.whitelist) ? s.whitelist.map(String) : null; // null = 全部
+    return (chars || []).filter(function (c) {
+      var k = String(charKeyOf(c));
+      if (excluded.has(k) || excluded.has(c.name)) return false;
+      if (wl === null) return true;
+      if (wl.indexOf(k) >= 0 || wl.indexOf(c.name) >= 0) return true;
+      if (autoTags.length && (c.tag || []).some(function (t) { return autoTags.indexOf(String(t)) >= 0; })) return true;
+      return false;
+    });
+  }
+  /** 角色卡名 → 世界书关键词候选（去空格 / 尾字简称，与群聊 keyByName 别名逻辑一致） */
+  function roleKeyAliases(name) {
+    var out = [];
+    var n = String(name || '').trim();
+    if (!n) return out;
+    out.push(n);
+    var nt = n.replace(/\s+/g, '');
+    if (nt && nt !== n) out.push(nt);
+    if (n.length >= 3) {
+      var last = n.slice(-1);
+      if (/[\u4e00-\u9fa5]/.test(last) && !/子|人|的|们|君|桑/.test(last)) out.push(last);
+    }
+    return out;
+  }
+  /** 生成/更新「WeChat-角色人设」世界书：把通讯录角色卡人设写成关键词条目，自动挂到当前玩家账号 */
+  async function genRoleWorldbook() {
+    var s = getSettings();
+    var chars = await listCharacters(true);
+    var targets = whitelistCharsForGen(chars);
+    var wbName = s.roleWbName || 'WeChat-角色人设';
+    var entries = {};
+    var uid = 0;
+    targets.forEach(function (c) {
+      var desc = String(c.description || '').trim();
+      var pers = String(c.personality || '').trim();
+      var scen = String(c.scenario || '').trim();
+      var content = [desc, pers, scen].filter(Boolean).join('\n\n');
+      if (!content) return;
+      uid++;
+      var keys = [];
+      roleKeyAliases(c.name).forEach(function (a) { if (keys.indexOf(a) < 0) keys.push(a); });
+      entries[uid] = {
+        uid: uid,
+        comment: '角色人设·' + c.name,
+        constant: false,
+        selective: true,
+        selectiveLogic: 0,
+        position: 0,
+        depth: 4,
+        disable: false,
+        key: keys,
+        keysecondary: [],
+        content: content,
+      };
+    });
+    if (!uid) throw new Error('通讯录里没有可生成的角色（请先添加角色到通讯录）');
+    await st('POST', '/api/worldinfo/edit', { name: wbName, data: { entries: entries } });
+    s.roleWbId = wbName;
+    // 自动挂载到当前玩家账号（未挂过才挂）
+    var players = Array.isArray(s.players) ? s.players : [];
+    var activeId = s.activePlayerId;
+    var pl = players.find(function (p) { return p.id === activeId; }) || players[0];
+    if (pl) {
+      var wbSel = Object.assign({}, pl.wbSel || {});
+      if (!wbSel[wbName]) wbSel[wbName] = { name: wbName, uids: ['*'] };
+      pl.wbSel = wbSel;
+    }
+    saveSettings();
+    return { ok: true, fileId: wbName, count: uid, chars: targets.map(function (x) { return x.name; }) };
+  }
 
   /* ---------------- 会话文件（读 / 存 / 删） ---------------- */
   async function getChat(avatar, file) {
@@ -1131,6 +1382,10 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       chatBg: getSettings().chatBg || '',
       aiBehavior: getSettings().aiBehavior || null,
       groupActive: getSettings().groupActive || null,
+      active: Object.assign(
+        { enabled: true, privateEnabled: true, privateHours: 4, groupEnabled: true, groupHours: 3, momentEnabled: true, momentHours: 6, momentImg: true, momentImgChance: 0.5, articleEnabled: true, articleHours: 12, articleImg: true, articleImgChance: 0.5 },
+        getSettings().active || {}
+      ),
       showFab: getSettings().showFab !== false,
       isExtension: true,
     };
@@ -1523,12 +1778,32 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
               '<label>不回概率（%） <input id="wxst-ai-skip-rate" type="number" min="0" max="100" value="' + ((s.aiBehavior && s.aiBehavior.skipRate) || 20) + '"></label>' +
               '<div class="wxst-set-tip">私信默认必回；勾选上面的开关后，分享/群/主动推送的回复会按概率延迟或不回。你在聊天页当面发消息始终立即回。</div>' +
             '</div>' +
+            '<div class="wxst-set-section"><div class="wxst-set-title">AI 活跃行为（活人感）</div>' +
+              '<label class="wxst-row"><input type="checkbox" id="wxst-act-enabled"' + (s.active && s.active.enabled === false ? '' : ' checked') + '> 启用 AI 主动行为（角色会主动找你、群里自己聊、自己发朋友圈/公众号）</label>' +
+              '<div class="wxst-set-sub">主动私信</div>' +
+              '<label class="wxst-row"><input type="checkbox" id="wxst-act-private"' + (s.active && s.active.privateEnabled === false ? '' : ' checked') + '> 关联角色主动私信你（非关联角色不会来）</label>' +
+              '<label>私信频率（每 N 小时最多 1 次，可填小数如 0.1=6 分钟） <input id="wxst-act-private-hours" type="number" min="0.1" max="720" step="0.1" value="' + ((s.active && s.active.privateHours) || 4) + '"></label>' +
+              '<div class="wxst-set-sub">主动群聊</div>' +
+              '<label class="wxst-row"><input type="checkbox" id="wxst-act-group"' + (s.active && s.active.groupEnabled === false ? '' : ' checked') + '> 角色主动在群里展开话题（随机一个群自己聊起来）</label>' +
+              '<label>群聊频率（每 N 小时最多 1 次，可填小数） <input id="wxst-act-group-hours" type="number" min="0.1" max="720" step="0.1" value="' + ((s.active && s.active.groupHours) || 3) + '"></label>' +
+              '<div class="wxst-set-sub">主动朋友圈</div>' +
+              '<label class="wxst-row"><input type="checkbox" id="wxst-act-moment"' + (s.active && s.active.momentEnabled === false ? '' : ' checked') + '> 关联角色主动发朋友圈</label>' +
+              '<label>发圈频率（每 N 小时最多 1 次，可填小数） <input id="wxst-act-moment-hours" type="number" min="0.1" max="720" step="0.1" value="' + ((s.active && s.active.momentHours) || 6) + '"></label>' +
+              '<label class="wxst-row"><input type="checkbox" id="wxst-act-moment-img"' + (s.active && s.active.momentImg === false ? '' : ' checked') + '> 主动发圈时生图配图</label>' +
+              '<label>带图概率（%） <input id="wxst-act-moment-imgchance" type="number" min="0" max="100" value="' + ((s.active && s.active.momentImgChance != null ? Math.round(s.active.momentImgChance * 100) : 50)) + '"></label>' +
+              '<div class="wxst-set-sub">自动公众号</div>' +
+              '<label class="wxst-row"><input type="checkbox" id="wxst-act-article"' + (s.active && s.active.articleEnabled === false ? '' : ' checked') + '> 公众号自动发文（AI 拟小编按世界观写）</label>' +
+              '<label>发文频率（每 N 小时最多 1 次，可填小数） <input id="wxst-act-article-hours" type="number" min="0.1" max="720" step="0.1" value="' + ((s.active && s.active.articleHours) || 12) + '"></label>' +
+              '<label class="wxst-row"><input type="checkbox" id="wxst-act-article-img"' + (s.active && s.active.articleImg === false ? '' : ' checked') + '> 自动发文时生图配封面</label>' +
+              '<label>带图概率（%） <input id="wxst-act-article-imgchance" type="number" min="0" max="100" value="' + ((s.active && s.active.articleImgChance != null ? Math.round(s.active.articleImgChance * 100) : 50)) + '"></label>' +
+              '<div class="wxst-set-tip">这些行为由微信页面自己定时触发（每几分钟检查一次，按你设的频率冷却）。需要微信页面开着才会跑，想更热闹就把频率调小（如私信每 2 小时一次）。</div>' +
+            '</div>' +
             '<div class="wxst-set-section"><div class="wxst-set-title">群活跃（AI 自发聊天）</div>' +
               '<label>发消息后 AI 连聊轮数（最少～最多，每轮 1~2 条） <input id="wxst-ga-chatmin" type="number" min="0" max="10" value="' + ((s.groupActive && s.groupActive.chatMin) != null ? s.groupActive.chatMin : 1) + '">～<input id="wxst-ga-chatmax" type="number" min="1" max="12" value="' + ((s.groupActive && s.groupActive.chatMax) != null ? s.groupActive.chatMax : 3) + '"></label>' +
               '<label>「🔥群活跃」按钮聊天轮数（最少～最多） <input id="wxst-ga-spontmin" type="number" min="1" max="10" value="' + ((s.groupActive && s.groupActive.spontMin) || 3) + '">～<input id="wxst-ga-spontmax" type="number" min="1" max="12" value="' + ((s.groupActive && s.groupActive.spontMax) || 6) + '"></label>' +
               '<label class="wxst-row"><input type="checkbox" id="wxst-ga-aigroup"' + ((s.groupActive && s.groupActive.aiGroupEnabled) ? ' checked' : '') + '> AI 主动拉群：角色会自发创建新群（AI 是群主）</label>' +
               '<label class="wxst-row"><input type="checkbox" id="wxst-ga-aimanage"' + ((s.groupActive && s.groupActive.aiManage) ? ' checked' : '') + '> 聊天执行群管理：成员在群里说「把XX设为/取消管理员」「转让群主给XX」会真实生效</label>' +
-              '<label>AI 拉群频率（每 N 小时最多 1 次） <input id="wxst-ga-aigrouphours" type="number" min="1" max="720" value="' + ((s.groupActive && s.groupActive.aiGroupHours) || 24) + '"></label>' +
+              '<label>AI 拉群频率（每 N 小时最多 1 次，可填小数） <input id="wxst-ga-aigrouphours" type="number" min="0.1" max="720" step="0.1" value="' + ((s.groupActive && s.groupActive.aiGroupHours) || 24) + '"></label>' +
               '<label>AI 拉群触发概率（0~1，0.5=一半机会） <input id="wxst-ga-aigroupchance" type="number" min="0" max="1" step="0.1" value="' + ((s.groupActive && s.groupActive.aiGroupChance) != null ? s.groupActive.aiGroupChance : 0.5) + '"></label>' +
               '<div class="wxst-set-tip">聊天轮数=成员轮流接话的轮数。想群里更热闹就把数值调大（如发消息后 1~4 轮）。AI 主动拉群开启后，角色会随机拉新群并当群主，群里成员会自然开场。</div>' +
             '</div>' +
@@ -1752,10 +2027,29 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
         var spontMin = Math.max(1, Number(document.getElementById('wxst-ga-spontmin').value) || 3);
         var spontMax = Math.max(spontMin, Number(document.getElementById('wxst-ga-spontmax').value) || 6);
         var aiGroupEnabled = !!document.getElementById('wxst-ga-aigroup').checked;
-        var aiGroupHours = Math.max(1, Number(document.getElementById('wxst-ga-aigrouphours').value) || 24);
+        var aiGroupHours = Math.max(0.1, Number(document.getElementById('wxst-ga-aigrouphours').value) || 24);
         var aiGroupChance = Math.min(1, Math.max(0, Number(document.getElementById('wxst-ga-aigroupchance').value) || 0.5));
         var aiManage = !!document.getElementById('wxst-ga-aimanage').checked;
         s.groupActive = { chatMin: chatMin, chatMax: chatMax, spontMin: spontMin, spontMax: spontMax, aiGroupEnabled: aiGroupEnabled, aiGroupHours: aiGroupHours, aiGroupChance: aiGroupChance, aiManage: aiManage };
+      }
+      // AI 活跃行为
+      var actEnabled = document.getElementById('wxst-act-enabled');
+      if (actEnabled) {
+        var act = {};
+        act.enabled = actEnabled.checked;
+        act.privateEnabled = !!document.getElementById('wxst-act-private').checked;
+        act.privateHours = Math.max(0.1, Number(document.getElementById('wxst-act-private-hours').value) || 4);
+        act.groupEnabled = !!document.getElementById('wxst-act-group').checked;
+        act.groupHours = Math.max(0.1, Number(document.getElementById('wxst-act-group-hours').value) || 3);
+        act.momentEnabled = !!document.getElementById('wxst-act-moment').checked;
+        act.momentHours = Math.max(0.1, Number(document.getElementById('wxst-act-moment-hours').value) || 6);
+        act.momentImg = !!document.getElementById('wxst-act-moment-img').checked;
+        act.momentImgChance = Math.min(1, Math.max(0, Number(document.getElementById('wxst-act-moment-imgchance').value) / 100 || 0.5));
+        act.articleEnabled = !!document.getElementById('wxst-act-article').checked;
+        act.articleHours = Math.max(0.1, Number(document.getElementById('wxst-act-article-hours').value) || 12);
+        act.articleImg = !!document.getElementById('wxst-act-article-img').checked;
+        act.articleImgChance = Math.min(1, Math.max(0, Number(document.getElementById('wxst-act-article-imgchance').value) / 100 || 0.5));
+        s.active = act;
       }
       // 清理空对象
       Object.keys(s.chat).forEach(function (k) { if (s.chat[k] === undefined) delete s.chat[k]; });
@@ -1860,6 +2154,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
         avatar: (meta[name] && meta[name].avatar) || '',
         memberKeys: (meta[name] && meta[name].memberKeys) || [],
         createdAt: (meta[name] && meta[name].createdAt) || 0,
+        ownerId: (meta[name] && meta[name].ownerId) || '',
         unread: (meta[name] && meta[name].unread) || 0,
         lastPreview: last ? (last.name + '：' + cleanGroupText(last.text)) : '',
         lastTime: last ? last.time : 0,
@@ -1868,7 +2163,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     }
     return out;
   }
-  async function createWeChatGroup(name, memberKeys, ownerKey) {
+  async function createWeChatGroup(name, memberKeys, ownerKey, ownerId) {
     name = String(name || '').trim();
     if (!name) throw new Error('群名不能为空');
     var meta = groupMeta();
@@ -1879,6 +2174,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       name: name, memberKeys: memberKeys,
       adminKeys: ownerKey ? [ownerKey] : [],
       owner: ownerKey || null,
+      ownerId: ownerId || null,  // 群归属的玩家账号 id（切人设=切号，只显示本账号的群）
       muted: {}, kicked: {}, createdAt: Date.now(),
     };
     saveSettings();
@@ -2048,6 +2344,67 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       return d.toLocaleString('zh-CN', { timeZone: tz || 'Asia/Shanghai', hour12: false, year: 'numeric', month: 'long', day: 'numeric', weekday: 'long', hour: '2-digit', minute: '2-digit' });
     } catch (e) { return d.toLocaleString('zh-CN'); }
   }
+  /**
+   * 从超长角色卡 description 里智能提取群聊需要的部分（基本信息+性格+说话风格+对他人态度/关系）。
+   * 不写死世界观：按 Markdown 章节标题 + 关键词加权选段，避免只截头部导致角色性格/关系全丢。
+   */
+  function extractPersona(desc, maxLen) {
+    maxLen = maxLen || 1800;
+    desc = String(desc || '').trim();
+    if (!desc) return '';
+    if (desc.length <= maxLen) return desc;
+    // 按 Markdown 标题（#/##/###…）切块，保留每块标题行
+    var lines = desc.split(/\r?\n/);
+    var blocks = [];
+    var cur = [];
+    var curHead = '';
+    function flush() {
+      if (!cur.length) return;
+      var text = cur.join('\n').trim();
+      if (text) blocks.push({ head: curHead, text: text, score: 0 });
+    }
+    for (var i = 0; i < lines.length; i++) {
+      var ln = lines[i];
+      if (/^#{1,4}\s+\S/.test(ln)) { flush(); curHead = ln.replace(/^#+\s*/, '').trim(); cur = [ln]; }
+      else cur.push(ln);
+    }
+    flush();
+    if (blocks.length < 2) return desc.slice(0, maxLen); // 无章节结构，退化截断
+    // 关键词权重：性格/说话/语言/口吻/语气/态度/关系/对待/称呼 高，行为/习惯/日常 中，外貌/衣着/能力/术式 低
+    var high = ['性格', '说话', '语言', '口吻', '语气', '态度', '关系', '对待', '称呼', '对', '心理', '人设', '风格', '深层'];
+    var mid = ['行为', '习惯', '日常', '目标', '动机', '兴趣', '癖好', '标签', '身份'];
+    var low = ['外貌', '衣着', '服装', '能力', '术式', '擅长', '不擅长', '身材', '发型', '饰品', '视觉'];
+    function blockScore(txt) {
+      var s = 0;
+      high.forEach(function (k) { if (txt.indexOf(k) >= 0) s += 6; });
+      mid.forEach(function (k) { if (txt.indexOf(k) >= 0) s += 2; });
+      low.forEach(function (k) { if (txt.indexOf(k) >= 0) s -= 3; });
+      return s;
+    }
+    blocks.forEach(function (b) { b.score = blockScore(b.head + ' ' + b.text); });
+    // 首块（标题/基本信息）固定保留但压缩
+    var first = blocks[0];
+    var firstText = first.text.length > 350 ? first.text.slice(0, 350) + '…' : first.text;
+    var rest = blocks.slice(1).sort(function (a, b) { return b.score - a.score; });
+    var out = [firstText];
+    var used = firstText.length;
+    rest.forEach(function (b) {
+      if (used >= maxLen || b.score <= 0) return;
+      var take = b.text.length > 420 ? b.text.slice(0, 420) + '…' : b.text;
+      out.push(take);
+      used += take.length;
+    });
+    // 若分数高的没选够仍没满，补零分块直到上限（避免信息太少）
+    if (used < maxLen) {
+      rest.forEach(function (b) {
+        if (used >= maxLen || b.score > 0) return;
+        var take = b.text.length > 260 ? b.text.slice(0, 260) + '…' : b.text;
+        out.push(take);
+        used += take.length;
+      });
+    }
+    return out.join('\n').slice(0, maxLen);
+  }
   /** 群 AI 生成：单模型多角色轮流接话。members: [{key,name,relation}]；返回 [{key,text}] */
   async function genGroupReply(args) {
     var name = args.groupName;
@@ -2085,6 +2442,69 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
         keyByName[last] = keyByName[nm];
       }
     });
+    // ---- 群聊注入：读取玩家挂载世界书（常开 + 关键词激活）+ 角色人设世界书 ----
+    var s = getSettings();
+    var playersArr = Array.isArray(s.players) ? s.players : [];
+    var curPlayer = playersArr.find(function (p) { return p.id === s.activePlayerId; }) || playersArr[0];
+    var wbSel = (curPlayer && curPlayer.wbSel) || {};
+    var roleWbId = s.roleWbId || '';
+    var roleWbMounted = !!(roleWbId && wbSel[roleWbId]);
+    var worldBlocks = [];      // 常开条目（世界观）
+    var activatedBlocks = [];  // 关键词命中的条目（最近聊天提到才注入）
+    var roleWbMap = {};        // 角色人设世界书：别名 -> 完整人设内容
+    var historyText = messages.slice(-8).map(function (m) { return String(m.text || ''); }).join('\n');
+    for (var fid in wbSel) {
+      var sel = wbSel[fid] || {};
+      var uids = (Array.isArray(sel.uids) && sel.uids.length) ? sel.uids.map(String) : ['*'];
+      var ents = [];
+      try { ents = await getWorldInfoForGroup(fid); } catch (e) { continue; }
+      var chosen = ents.filter(function (e) {
+        if (e.enabled === false) return false;
+        if (uids.length === 1 && uids[0] === '*') return true;
+        return uids.indexOf(String(e.uid)) >= 0;
+      });
+      chosen.forEach(function (e) {
+        if (e.constant) { if (e.content) worldBlocks.push(e.content); return; }
+        var hit = (e.key || []).some(function (k) { return k && historyText.indexOf(k) >= 0; });
+        if (fid === roleWbId) {
+          (e.key || []).forEach(function (k) { if (k && !roleWbMap[k]) roleWbMap[k] = e.content || ''; });
+          if (hit && e.content) activatedBlocks.push(e.content);
+        } else if (hit && e.content) {
+          activatedBlocks.push(e.content);
+        }
+      });
+    }
+    // 角色人设世界书补充激活：群里用微信名（如「伏黑基尔」）提到角色时也激活该角色完整人设
+    if (roleWbMounted) {
+      members.forEach(function (m) {
+        if (String(m.key || '').indexOf('__me__') === 0) return;
+        var c = (chars || []).find(function (x) { return charKeyOf(x) === m.key; });
+        var names = [String(m.name || '')].concat(c ? roleKeyAliases(c.name) : []).concat(roleKeyAliases(m.name));
+        var hit = names.some(function (n) { return n && historyText.indexOf(n) >= 0; });
+        if (hit) {
+          var full = roleWbDescFor(m.name, c);
+          if (full && activatedBlocks.indexOf(full) < 0) activatedBlocks.push(full);
+        }
+      });
+    }
+    /** 从角色人设世界书按微信名/角色名/别名取该角色完整人设 */
+    function roleWbDescFor(wname, c) {
+      if (!roleWbMap || !Object.keys(roleWbMap).length) return '';
+      var cands = [String(wname || '')].concat(c ? roleKeyAliases(c.name) : []).concat(roleKeyAliases(wname));
+      for (var i = 0; i < cands.length; i++) {
+        if (cands[i] && roleWbMap[cands[i]]) return roleWbMap[cands[i]];
+      }
+      return '';
+    }
+    // 全员人设合计预算：决定角色卡 description 是否完整注入；超预算才降级智能提取
+    var allDescTotal = 0;
+    members.forEach(function (m) {
+      if (String(m.key || '').indexOf('__me__') === 0) return;
+      var c = (chars || []).find(function (x) { return charKeyOf(x) === m.key; });
+      if (c) allDescTotal += String(c.description || c.personality || '').length;
+    });
+    var fullInjection = allDescTotal <= 22000;
+    var maxPerChar = 8000;
     // 成员设定压缩为一句，避免长文本被模型抄写
     var memberLines = members.map(function (m) {
       // 玩家本人：明确身份与称呼方式，避免 AI 一直喊「群主」而不是用名字
@@ -2095,9 +2515,16 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       var c = (chars || []).find(function (x) { return charKeyOf(x) === m.key; });
       var desc = '';
       if (c) {
-        var d = String(c.description || '').trim();
-        var p = String(c.personality || '').trim();
-        desc = (d || p).slice(0, 90);
+        var fromWb = roleWbDescFor(m.name, c);
+        if (roleWbMounted) {
+          // 角色人设世界书模式：成员表给精简人设（基础认知），完整人设由【本次话题相关设定】按关键词激活补全
+          desc = extractPersona(fromWb || String(c.description || c.personality || '').trim(), 700);
+        } else {
+          // 未挂世界书：用角色卡 description（合计超预算才精简）
+          desc = String(c.description || c.personality || '').trim();
+          if (desc && fullInjection && desc.length > maxPerChar) desc = desc.slice(0, maxPerChar);
+          else if (desc && !fullInjection) desc = extractPersona(desc);
+        }
       }
       return m.name + (m.relation ? '（和我的关系：' + m.relation + '）' : '') + (desc ? '：' + desc : '');
     }).join('\n');
@@ -2113,7 +2540,12 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       if (mentioned.indexOf('@all') >= 0) mentionNote = '\n【注意】用户最新消息 @了全员，所有成员都必须回应，不能只回一个。\n';
       else mentionNote = '\n【注意】用户最新消息 @了：' + mentioned.join('、') + '。被 @ 的成员必须第一个回应，其他人可以视情况补充或不回。\n';
     }
+    var worldNote = '';
+    if (worldBlocks.length) worldNote += '\n【常开世界观】（世界观基础设定，用于理解世界背景）：\n' + worldBlocks.join('\n\n');
+    if (activatedBlocks.length) worldNote += '\n【本次话题相关设定】（最近聊天涉及到的角色/地点/事件设定，用于把握相关人设，严禁照抄或输出给用户）：\n' + activatedBlocks.join('\n\n');
     var system = '你是一个微信群聊模拟器，群名「' + name + '」。请扮演群里成员，模拟他们在微信里的真实聊天。\n' +
+      '\n' +
+      '【世界观背景】（用于理解这个世界的地名/组织/势力/人物关系与正确称谓，只用于理解和把握人设，严禁照抄或输出给用户）：\n' + [String(meDesc || '').slice(0, 1200)].concat(worldBlocks).join('\n') + worldNote + '\n' +
       '\n' +
       '【群成员】（只用于理解每个角色的性格，严禁把设定原文或规则输出给用户）：\n' + memberLines + ann + evt + '\n' +
       '【重要】只有上面【群成员】里列出的角色在这个群里。其他人即使被提到（比如"把XX拉进来""拉上XX"），只要不在这个列表里，就一律视为还没进群、不在群里，千万不要说"他/她就在群里"或"已经在群里"。\n' +
@@ -2129,6 +2561,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       '6. 成员在说话时可以用「@成员名」@ 别人（像微信一样@对方），对方下一轮会接话；但不要每条都@。@ 玩家时必须用他的微信名「@' + meName + '」，绝不要写成「@玩家」。\n' +
       '6.5 提到玩家（可能是群主/管理员）时，一律用他的微信名「' + meName + '」称呼，不要用「群主」「管理员」这类头衔代替称呼（例如说「' + meName + '同意就行」，不要说「群主同意就行」）。\n' +
       '6.8 玩家（' + meName + '）是你在微信里对话的对象，TA 由本人说话，绝不要替 TA 发言。你只以其他群成员的身份输出消息，绝对不要输出「角色=' + meName + '」「角色=玩家」「角色=我」这样的玩家消息；如果按聊天逻辑该轮到玩家回应了，就自然结束这一轮，等 TA 自己输入。\n' +
+      '6.9 每个成员都必须严格贴合自己的角色卡人设和世界观：说话语气、口头禅、性格、对别人的态度都和 TA 的设定一致；成员之间的关系、彼此怎么称呼（同期/同窗/平辈之间直呼名字或昵称，只有明确的师生/前后辈/上下级才用敬称；亲属/家族关系严格按设定，不要凭空捏造温情的亲子互动或与设定不符的态度）都要符合角色卡和世界观背景，不要脸谱化，也不要因为群聊就降低人设还原度。\n' +
       '7. 绝对禁止输出：任何解释、规则、设定原文、自我介绍、括号、星号、引号、旁白、示例、开头结尾客套话；说话内容里不要带「XX：」这类名字前缀。\n' +
       '【格式示例】\n' +
       '用户消息：我回来了\n' +
@@ -2229,6 +2662,9 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     listWorldInfos: listWorldInfos,
     getWorldInfoText: getWorldInfoText,
     getWorldInfoEntries: getWorldInfoEntries,
+    genRoleWorldbook: genRoleWorldbook,
+    exportAccount: exportAccountBackup,
+    importAccount: importAccountBackup,
     listWeChatGroups: listWeChatGroups,
     getWeChatGroup: getWeChatGroup,
     createWeChatGroup: createWeChatGroup,

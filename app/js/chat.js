@@ -272,8 +272,8 @@ const Chat = (() => {
     ctx.busy = false;
     Store.setCurrent({ charKey: App.charKey(character), charName: App.displayName(character), file: session.file, title: session.title });
     App.showPage('page-chat', render);
-    // 打开会话即已读，清掉未读红点
-    Store.touchSession(App.charKey(character), App.displayName(character), session.file, { unread: 0 });
+    // 打开会话即已读，清掉未读红点；同时清掉可能残留的"正在输入"标记
+    Store.touchSession(App.charKey(character), App.displayName(character), session.file, { unread: 0, typing: false });
     if (typeof ChatList !== 'undefined' && ChatList.refreshTabBadge) ChatList.refreshTabBadge();
     try {
       ctx.chat = await loadChat(character, session);
@@ -297,7 +297,8 @@ const Chat = (() => {
       }
       if (player.name && player.name !== '我') parts.push(`我是「${player.name}」。`);
       if (player.signature) parts.push(`我的个性签名：${player.signature}`);
-      if (player.worldbook) parts.push(`关于我（世界书/设定）：${player.worldbook}`);
+      const playerWb = [player.mountedText, player.worldbook].filter(Boolean).join('\n');
+      if (playerWb) parts.push(`关于我（世界书/设定）：${playerWb}`);
     }
     parts.push(`你是${c.name}。`);
     if (c.description) parts.push(`角色设定：${c.description}`);
@@ -333,8 +334,10 @@ const Chat = (() => {
 
   /* ---- 发送 / AI 请求 ---- */
 
-  // 在途 AI 请求版本号：撤回/删除/重说时递增，使未完成的旧请求作废，避免残留/乱序
-  let reqSeq = 0;
+  // 在途 AI 请求版本号（按会话文件隔离）：撤回/删除/重说时递增本会话的版本号，只作废该会话未完成的旧请求。
+  // 之前用全局 reqSeq，会导致 A 会话的请求被 B 会话的请求误作废（退出 A 页后 AI 回复丢失、跨窗口撤回乱作废）。
+  const sessionSeq = {};  // file -> 序号
+  function bumpSession(file) { if (file) sessionSeq[file] = (sessionSeq[file] || 0) + 1; }
 
   /** 请求 AI 回复（send / 撤回 / 重说 / 后台分享共用）；extraEvent 为附加的事件提示（作为 user 消息末尾追加，不进历史）；opts 可指定目标会话（后台发送用，不依赖当前 ctx） */
   async function askAI(extraEvent, opts) {
@@ -346,12 +349,20 @@ const Chat = (() => {
     const myFile = opts.file || ctx.session.file;
     const myChat = opts.chat || ctx.chat;
     const myAvatar = opts.avatar || avatarKey(myChar);
-    const isBg = !!opts.char;   // 后台请求（分享/推送）：独立并行，不参与 reqSeq 作废（否则并发互相作废只剩最后一个）
-    const myReq = isBg ? -1 : ++reqSeq;
+    const isBg = !!opts.char;   // 后台请求（分享/推送）：独立并行，不参与作废（否则并发互相作废只剩最后一个）
+    const myReq = isBg ? -1 : (sessionSeq[myFile] = (sessionSeq[myFile] || 0) + 1);
     pendingMap[myFile] = myReq;
     // 是否正打开该会话（决定弹气泡 + 未读）：仅当走"当前 ctx"且页面可见
     const viewing = !opts.char && ctx.session && ctx.session.file === myFile && isChatPageVisible();
     if (viewing) render(); // 显示"正在输入…"
+    else {
+      // 用户不在该会话页：给会话列表标记"正在输入…"，让用户退出后也知道 AI 还在回
+      try {
+        const sc = Store.sessionsOf(myCharKey, myCharName).find(x => x.file === myFile);
+        Store.touchSession(myCharKey, myCharName, myFile, { typing: true, updatedAt: (sc && sc.updatedAt) || Date.now() });
+      } catch (e) {}
+      if (typeof ChatList !== 'undefined') ChatList.render();
+    }
     // 后台触发的回复（分享/主动推送）：按「AI 回复行为」配置延迟或选择性不回（当面聊天始终立即回）
     if (opts.char) {
       const ab = (App.state && App.state.config && App.state.config.aiBehavior) || null;
@@ -373,7 +384,7 @@ const Chat = (() => {
       if (extraEvent) hist.push({ role: 'user', content: extraEvent });
       const messages = [{ role: 'system', content: buildSystemPrompt(myChar) }, ...hist];
       const reply = await API.genChat(messages, { temperature: 0.9 });
-      if (!isBg && myReq !== reqSeq) { if (pendingMap[myFile] === myReq) delete pendingMap[myFile]; return; } // 已被撤回/删除/重说作废，不写入
+      if (!isBg && myReq !== sessionSeq[myFile]) { if (pendingMap[myFile] === myReq) delete pendingMap[myFile]; return; } // 本会话内已被撤回/删除/重说作废，不写入
       const content = (reply.content || '').trim();
       // 保存 AI 回复（保留 ||| 原始内容）
       myChat.push({
@@ -395,6 +406,7 @@ const Chat = (() => {
         preview: preview.slice(0, 60),
         updatedAt: Date.now(),
         unread: viewing ? 0 : ((s && s.unread) || 0) + 1,
+        typing: false,
       });
       // 若用户已退出该聊天页：实时刷新会话列表（未读红点 / 预览）
       if (!viewing && typeof ChatList !== 'undefined') ChatList.render();
@@ -405,8 +417,9 @@ const Chat = (() => {
         else render();
       }
     } catch (e) {
-      if (!isBg && myReq !== reqSeq) { if (pendingMap[myFile] === myReq) delete pendingMap[myFile]; return; }
+      if (!isBg && myReq !== sessionSeq[myFile]) { if (pendingMap[myFile] === myReq) delete pendingMap[myFile]; return; }
       if (pendingMap[myFile] === myReq) delete pendingMap[myFile];
+      try { Store.touchSession(myCharKey, myCharName, myFile, { typing: false }); } catch (e) {}
       UI.toast('回复失败：' + e.message);
       if (ctx.session && ctx.session.file === myFile) { ctx.busy = false; render(); }
     }
@@ -491,18 +504,22 @@ const Chat = (() => {
     } catch (e) {}
   }
 
-  /** 角色主动给玩家发私信（禁言/事件触发）：AI 生成角色口吻的一句话写进该角色会话并未读+1（玩家回复后自然延续） */
-  async function sendCharMessageToPlayer(char, session, eventText) {
+  /** 角色主动给玩家发私信：AI 生成角色口吻的一句话写进该角色会话并未读+1（玩家回复后自然延续）
+   *  eventText：触发事件描述；asActive=true 时用「角色主动找玩家聊天」的自然开场措辞 */
+  async function sendCharMessageToPlayer(char, session, eventText, asActive) {
     if (!char || !session) return;
     const avatar = avatarKey(char);
     const file = session.file;
     const chat = await loadChat(char, session);
     const hist = buildHistory(chat).slice(-8);
     const name = App.displayName(char);
+    const promptLine = asActive
+      ? '现在你是「' + name + '」，主动找玩家聊聊（分享近况、问个事、吐槽、约个饭都行，符合你的性格和你们现在的关系）。参考你们最近的聊天内容自然地接着聊，别重复已经说过的话，别把刚聊过的内容再问一遍。像真人发微信那样口语化，一句到两句。只发说出口的话，不要动作/表情/心理描写，不要括号，不要解释自己。'
+      : '（新事件：' + eventText + '）现在你是「' + name + '」，主动给玩家发一条微信消息，围绕这件事自然地说一句话（质问、吐槽、解释都行，符合你的性格）。只发说出口的话，口语化，不要动作/表情/心理描写，不要括号，不要解释自己。';
     const messages = [
       { role: 'system', content: buildSystemPrompt(char) },
       ...hist,
-      { role: 'user', content: '（新事件：' + eventText + '）现在你是「' + name + '」，主动给玩家发一条微信消息，围绕这件事自然地说一句话（质问、吐槽、解释都行，符合你的性格）。只发说出口的话，口语化，不要动作/表情/心理描写，不要括号，不要解释自己。' },
+      { role: 'user', content: promptLine },
     ];
     try {
       const reply = await API.genChat(messages, { temperature: 0.9, max_tokens: 200 });
@@ -622,7 +639,7 @@ const Chat = (() => {
 
   /** 撤回：移除用户消息 + 紧随其后的 AI 接话 + 显示撤回提示 + 触发 AI 反应 */
   async function recallMsg(chatIndex) {
-    reqSeq++; // 作废所有在途 AI 请求，防止撤回后旧回复残留
+    bumpSession(ctx.session && ctx.session.file); // 只作废本会话在途 AI 请求，防止撤回后旧回复残留
     const m = ctx.chat[chatIndex];
     if (!m || !m.is_user) return;
     // 一并删除紧随其后的 AI 接话（针对该消息的回复），避免撤回后残留"对着空气说话"
@@ -640,7 +657,7 @@ const Chat = (() => {
 
   /** 删除：移除该条消息 */
   async function deleteMsg(chatIndex) {
-    reqSeq++; // 作废在途请求
+    bumpSession(ctx.session && ctx.session.file); // 作废本会话在途请求
     const m = ctx.chat[chatIndex];
     if (!m) return;
     ctx.chat.splice(chatIndex, 1);
@@ -650,7 +667,7 @@ const Chat = (() => {
 
   /** 重说：从该条 AI 回复起截断并重新生成 */
   async function resayMsg(chatIndex) {
-    reqSeq++; // 作废在途请求
+    bumpSession(ctx.session && ctx.session.file); // 作废本会话在途请求
     const m = ctx.chat[chatIndex];
     if (!m || m.is_user) return;
     ctx.chat.splice(chatIndex);

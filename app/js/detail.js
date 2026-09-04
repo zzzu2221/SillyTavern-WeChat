@@ -25,6 +25,40 @@ const Detail = (() => {
     return n.remark ? n.remark : App.displayName(c);
   }
 
+  /** 角色间关系：settings.charRelations[keyA][keyB] = 关系（'陌生人'= 朋友圈不互评；未设置默认互通；支持自定义关系词） */
+  const RELATIONS = ['认识', '陌生人', '情侣', '恋人', '好友', '兄弟', '姐妹', '家人', '死对头', '师生', '同事', '其他', '自定义…'];
+  function relationsAll() {
+    try { return (API.getSettings() || {}).charRelations || {}; } catch (e) { return {}; }
+  }
+  function relationBetween(keyA, keyB) {
+    const all = relationsAll();
+    if (!keyA || !keyB || keyA === keyB) return '';
+    return (all[keyA] && all[keyB] && all[keyA][keyB]) || (all[keyB] && all[keyA] && all[keyB][keyA]) || '';
+  }
+  function saveRelation(keyA, keyB, rel) {
+    const all = relationsAll();
+    const a = Object.assign({}, all[keyA] || {});
+    const b = Object.assign({}, all[keyB] || {});
+    if (rel && rel !== '认识') { a[keyB] = rel; b[keyA] = rel; }
+    else { delete a[keyB]; delete b[keyA]; }
+    all[keyA] = a; all[keyB] = b;
+    API.saveAppSettings({ charRelations: all });
+    if (App.state.config) App.state.config.charRelations = all;
+  }
+  function saveAllRelations(key, map) {
+    const all = relationsAll();
+    Object.keys(map).forEach(k => {
+      const rel = map[k];
+      const a = Object.assign({}, all[key] || {});
+      const b = Object.assign({}, all[k] || {});
+      if (rel && rel !== '认识') { a[k] = rel; b[key] = rel; }
+      else { delete a[k]; delete b[key]; }
+      all[key] = a; all[k] = b;
+    });
+    API.saveAppSettings({ charRelations: all });
+    if (App.state.config) App.state.config.charRelations = all;
+  }
+
   /** 生图是否启用（设置面板「启用生图」开关，关闭时隐藏删除功能） */
   function imgEnabled() {
     const cfg = App.state.config || {};
@@ -107,6 +141,7 @@ const Detail = (() => {
         ${moreHtml}
         <div class="detail-cell" id="detail-cell-sig"><span class="dc-label">个性签名</span><span class="dc-value">${UI.esc(n.signature || '未设置')}</span><span class="dc-arrow">›</span></div>
         <div class="detail-cell" id="detail-cell-remark"><span class="dc-label">设置备注</span><span class="dc-value">${UI.esc(n.remark || '未设置')}</span><span class="dc-arrow">›</span></div>
+        <div class="detail-cell" id="detail-cell-rels"><span class="dc-label">角色关系</span><span class="dc-value">${relsCountText(c)}</span><span class="dc-arrow">›</span></div>
         <div class="detail-cell" id="detail-cell-bg"><span class="dc-label">聊天背景</span><span class="dc-value">${UI.esc(n.chatBg ? '已设置' : '默认')}</span><span class="dc-arrow">›</span></div>
       </div>
       <div class="detail-msgwrap"><button class="btn-detail-msg" id="detail-msg">发消息</button></div>
@@ -158,6 +193,9 @@ const Detail = (() => {
       render();
       if (typeof ChatList !== 'undefined') ChatList.render();
     });
+    // 角色间关系
+    const relsEl = document.getElementById('detail-cell-rels');
+    if (relsEl) relsEl.addEventListener('click', () => openRelationModal(c));
     // 聊天背景（该角色专属；支持色值/图片URL，留空恢复全局默认）
     document.getElementById('detail-cell-bg').addEventListener('click', async () => {
       const val = await editPrompt('聊天背景\n支持：色值（如 #E8E8E8）或图片链接；留空 = 用全局默认', n.chatBg || '', true);
@@ -226,7 +264,7 @@ const Detail = (() => {
           <input class="wx-confirm-input" value="${UI.esc(value || '')}">
           ${showUpload ? `<div style="text-align:center;margin:8px 0 0">
             <button type="button" class="wx-confirm-btn" id="wx-chatbg-upload" style="background:#fff;color:#07c160;border:1px solid #07c160">＋ 上传本地图片</button>
-            <input type="file" id="wx-chatbg-file" accept="image/*" style="display:none">
+            <input type="file" id="wx-chatbg-file" accept="image/*" style="position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0">
           </div>` : ''}
           <div class="wx-confirm-btns">
             <button class="wx-confirm-btn wx-confirm-cancel" type="button">取消</button>
@@ -256,6 +294,73 @@ const Detail = (() => {
       input.focus();
       input.select();
     });
+  }
+
+  /** 角色间关系：当前角色为"主角"，列出通讯录其他角色逐个选关系（陌生人 = 朋友圈不互评） */
+  function relsCountText(c) {
+    try {
+      const all = relationsAll();
+      const n = Object.keys(all[App.charKey(c)] || {}).length;
+      return n ? `已设置 ${n} 个关系` : '管理与其他角色';
+    } catch (e) { return '管理与其他角色'; }
+  }
+  function openRelationModal(c) {
+    const myKey = App.charKey(c);
+    const others = App.state.characters.filter(x => App.charKey(x) !== myKey);
+    const PRESET = RELATIONS.filter(r => r !== '自定义…');
+    const mask = document.createElement('div');
+    mask.className = 'wx-confirm-mask';
+    mask.innerHTML = `
+      <div class="wx-confirm" style="max-width:420px;width:88vw">
+        <div class="wx-confirm-title">「${UI.esc(shownName(c))}」与其他角色的关系</div>
+        <div style="font-size:12px;color:#999;margin-bottom:8px;line-height:1.5">「陌生人」= 朋友圈里互不评论；其他关系用于让 AI 把握互动；选「自定义…」可输入专属称呼（如「前辈」）。未设置的默认互通。</div>
+        <div class="acct-rel-list rels-list" style="max-height:55vh;overflow-y:auto">
+          ${others.length ? others.map(x => {
+            const rel = relationBetween(myKey, App.charKey(x));
+            const known = !!rel && PRESET.indexOf(rel) >= 0;
+            const selVal = rel ? (known ? rel : '__custom__') : '认识';
+            const customWord = rel && !known ? rel : '';
+            return `<div class="acct-rel">
+              <div class="acct-rel-head">
+                <div class="avatar">${UI.avatarSrc(x.avatar) ? `<img src="${UI.esc(UI.avatarSrc(x.avatar))}">` : ''}</div>
+                <div class="acct-rel-name">${UI.esc(shownName(x))}</div>
+                <select class="acct-rel-type" data-k="${UI.esc(App.charKey(x))}" data-custom="${UI.esc(customWord)}">${PRESET.map(r => `<option value="${r}"${r === selVal ? ' selected' : ''}>${r}</option>`).join('')}<option value="__custom__"${selVal === '__custom__' ? ' selected' : ''}>自定义…</option></select>
+              </div>
+              <div class="acct-rel-sub"><input class="acct-rel-custom" data-k="${UI.esc(App.charKey(x))}" placeholder="自定义关系词（选「自定义…」时填写）" value="${UI.esc(customWord)}" style="display:${selVal === '__custom__' ? 'block' : 'none'};width:100%;box-sizing:border-box"></div>
+            </div>`;
+          }).join('') : '<div class="acct-rel-empty">暂无其他角色</div>'}
+        </div>
+        <div class="wx-confirm-btns">
+          <button class="wx-confirm-btn wx-confirm-cancel" type="button">取消</button>
+          <button class="wx-confirm-btn wx-confirm-ok" type="button">保存</button>
+        </div>
+      </div>`;
+    // 「自定义…」选中时显示输入框
+    mask.querySelectorAll('.acct-rel-type').forEach(sel => {
+      sel.addEventListener('change', () => {
+        const sub = mask.querySelector('.acct-rel-custom[data-k="' + sel.dataset.k + '"]');
+        if (sub) sub.style.display = sel.value === '__custom__' ? 'block' : 'none';
+      });
+    });
+    const ok = mask.querySelector('.wx-confirm-ok');
+    const cancel = mask.querySelector('.wx-confirm-cancel');
+    const done = saved => { mask.remove(); if (saved) { render(); UI.toast('已保存角色关系'); } };
+    ok.addEventListener('click', () => {
+      const map = {};
+      mask.querySelectorAll('.acct-rel-type').forEach(sel => {
+        if (sel.value === '__custom__') {
+          const sub = mask.querySelector('.acct-rel-custom[data-k="' + sel.dataset.k + '"]');
+          map[sel.dataset.k] = (sub && sub.value.trim()) || '认识';
+        } else {
+          map[sel.dataset.k] = sel.value;
+        }
+      });
+      saveAllRelations(myKey, map);
+      done(true);
+    });
+    cancel.addEventListener('click', () => done(false));
+    mask.addEventListener('click', e => { if (e.target === mask) done(false); });
+    document.body.appendChild(mask);
   }
 
   function open(character) {
