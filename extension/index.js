@@ -1255,6 +1255,31 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     buckets.forEach(function (bk) { if (keySet.has(bk)) sessCfg[bk] = sessionsMap[bk]; });
     cfg.sessionsByPlayer = {};
     cfg.sessionsByPlayer[activeId] = { map: sessCfg, current: (sp.current && keySet.has(sp.current.charKey)) ? JSON.parse(JSON.stringify(sp.current)) : null };
+    // 朋友圈 / 公众号群组 ID（切号系统：per-account 隔离）
+    if (s.momentsGroupByPlayer && s.momentsGroupByPlayer[activeId]) {
+      cfg.momentsGroupByPlayer = {};
+      cfg.momentsGroupByPlayer[activeId] = String(s.momentsGroupByPlayer[activeId]);
+    }
+    if (s.articlesGroupByPlayer && s.articlesGroupByPlayer[activeId]) {
+      cfg.articlesGroupByPlayer = {};
+      cfg.articlesGroupByPlayer[activeId] = String(s.articlesGroupByPlayer[activeId]);
+    }
+    // 5) 群聊消息（朋友圈 / 公众号 —— 酒馆原生群组，消息存在 group chats 目录）
+    var groupChats = [];
+    try {
+      var mgId = s.momentsGroupByPlayer && s.momentsGroupByPlayer[activeId];
+      if (mgId) {
+        var mc = await st('POST', '/api/chats/group/get', { id: mgId });
+        groupChats.push({ type: 'moments', id: String(mgId), name: feedGroupName(MOMENTS_GROUP_NAME, activeId), chat: Array.isArray(mc) ? mc : [] });
+      }
+    } catch (e) {}
+    try {
+      var agId = s.articlesGroupByPlayer && s.articlesGroupByPlayer[activeId];
+      if (agId) {
+        var ac = await st('POST', '/api/chats/group/get', { id: agId });
+        groupChats.push({ type: 'articles', id: String(agId), name: feedGroupName(ARTICLES_GROUP_NAME, activeId), chat: Array.isArray(ac) ? ac : [] });
+      }
+    } catch (e) {}
     return {
       app: 'SillyTavern-WeChat',
       kind: 'account-backup',
@@ -1265,6 +1290,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       characters: characters,
       worlds: worlds,
       chats: chats,
+      groupChats: groupChats,
     };
   }
 
@@ -1335,6 +1361,37 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
         await st('POST', '/api/chats/save', { avatar_url: ch.avatar_url, file_name: ch.file_name, chat: ch.chat, force: true });
         push(result.chats, ch.file_name);
       } catch (e) { push(result.skipped, '聊天:' + ch.file_name); }
+    }
+    // 4) 群聊消息（朋友圈 / 公众号 —— 酒馆原生群组）
+    var gcl = (payload && Array.isArray(payload.groupChats)) ? payload.groupChats : [];
+    for (var k = 0; k < gcl.length; k++) {
+      var gc = gcl[k];
+      if (!gc || !gc.name || !Array.isArray(gc.chat)) { push(result.skipped, '群聊:' + ((gc && gc.type) || '?')); continue; }
+      try {
+        // 按名字查找已有群组，不存在则创建（导入后 ID 可能变化，ensureMomentsGroup 会按名字自动修正 ID）
+        var allG = await st('POST', '/api/groups/all', {});
+        var existG = (allG || []).find(function (g) { return g.name === gc.name; });
+        var targetId;
+        if (existG) {
+          targetId = existG.id;
+        } else {
+          var newG = await st('POST', '/api/groups/create', {
+            name: gc.name,
+            members: ['none'],
+            allow_self_responses: false,
+            activation_strategy: 0,
+            generation_mode: 0,
+            disabled_members: [],
+            fav: false,
+            chat_id: String(Date.now()),
+            chats: [],
+          });
+          targetId = newG.id;
+        }
+        // 写入群聊消息
+        await st('POST', '/api/chats/group/save', { id: targetId, chat: gc.chat, force: true });
+        push(result.chats, gc.type + ':' + gc.name);
+      } catch (e) { push(result.skipped, '群聊:' + gc.name); }
     }
     return result;
   }

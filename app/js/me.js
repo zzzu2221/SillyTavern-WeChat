@@ -209,6 +209,25 @@ const Me = (() => {
       } else if (curPlayers.length) {
         cfg.players = curPlayers;
       }
+      // 修复白名单 key：导入角色卡后 avatar 文件名可能变化（如 五条悟3.png → 五条悟.png），按角色名重新匹配
+      try {
+        const pid = cfg.activePlayerId || (cfg.players && cfg.players[0] && cfg.players[0].id);
+        if (pid && cfg.whitelistByPlayer && cfg.whitelistByPlayer[pid]) {
+          const wlStore = cfg.whitelistByPlayer[pid];
+          const wl = Array.isArray(wlStore.whitelist) ? wlStore.whitelist : [];
+          if (wl.length) {
+            const allChars = await API.listCharacters();
+            wlStore.whitelist = wl.map(oldKey => {
+              const direct = allChars.find(c => (c.key || c.avatar_file || c.name) === oldKey || c.avatar_file === oldKey || c.name === oldKey);
+              if (direct) return oldKey;
+              const nameGuess = String(oldKey).replace(/[0-9]+\.png$/i, '').replace(/\.png$/i, '').trim();
+              const byName = allChars.find(c => c.name === nameGuess || (nameGuess && String(c.name || '').indexOf(nameGuess) >= 0));
+              if (byName) return byName.key || byName.avatar_file || byName.name;
+              return oldKey;
+            });
+          }
+        }
+      } catch (e) {}
       API.saveAppSettings(cfg);
       // 旧备份（全局 whitelist/sessions）导入后一次性迁移到当前账号（切号系统）
       try { await API.migrateAccountData(); } catch (e) {}
