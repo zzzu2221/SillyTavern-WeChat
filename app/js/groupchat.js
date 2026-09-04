@@ -62,8 +62,10 @@ const GroupChat = (() => {
     } catch (e) { return ''; }
   }
   function groupAvatarHtml(g) {
-    // 群头像：首个成员头像，否则默认群图标
-    const key = (g.memberKeys && g.memberKeys[0]) || '';
+    // 优先用自定义群头像（群信息页上传）；否则跳过玩家取第一个非玩家成员头像，再兜底默认群图标
+    if (g && g.avatar && UI.avatarSrc(g.avatar)) return `<img src="${UI.esc(UI.avatarSrc(g.avatar))}">`;
+    const keys = (g.memberKeys || []).filter(k => String(k || '').indexOf('__me__') !== 0);
+    const key = keys[0] || '';
     const c = key ? App.charByKey(key) : null;
     if (c && UI.avatarSrc(c.avatar)) return `<img src="${UI.esc(UI.avatarSrc(c.avatar))}">`;
     return '<span class="g-avatar-fallback">👥</span>';
@@ -78,6 +80,17 @@ const GroupChat = (() => {
     // 优先按 key 匹配；历史坏消息 key 可能是名字 → 用名字兜底反查
     let m = current.members.find(x => x.key === key);
     if (!m && fallbackName) m = current.members.find(x => x.name === fallbackName);
+    // 名字带空格的角色卡（如「 虎杖悠仁」）去空格后匹配群成员，历史坏消息也能对上用户实际使用的卡
+    if (!m && fallbackName) {
+      const t = String(fallbackName).trim();
+      if (t) m = current.members.find(x => String(x.name || '').trim() === t);
+    }
+    if (!m) {
+      // 最终兜底：直接用角色卡查头像，避免空白
+      const c = key ? App.charByKey(key) : (fallbackName ? App.charByName(fallbackName) : null);
+      if (c && UI.avatarSrc(c.avatar)) return `<img src="${UI.esc(UI.avatarSrc(c.avatar))}">`;
+      return '';
+    }
     const c = m ? App.charByKey(m.key) : null;
     if (c && UI.avatarSrc(c.avatar)) return `<img src="${UI.esc(UI.avatarSrc(c.avatar))}">`;
     return '';
@@ -90,13 +103,16 @@ const GroupChat = (() => {
     }
     const c = key ? App.charByKey(key) : null;
     if (!c) return fallback || key || '';
-    return (typeof Detail !== 'undefined' && Detail.shownName) ? Detail.shownName(c) : App.displayName(c);
+    // 显示名去空格（兼容角色卡名带空格，如「 虎杖悠仁」→「虎杖悠仁」）
+    const n = String((typeof Detail !== 'undefined' && Detail.shownName) ? Detail.shownName(c) : App.displayName(c)).trim();
+    return n || fallback || key || '';
   }
 
-  /* ---------------- 群列表 ---------------- */
+  /* ---------------- 群列表（已并入主「微信」列表，无独立群聊页） ---------------- */
   function openGroups() {
-    groupsBack = currentPageId();
-    App.showPage('page-groups', renderGroups);
+    // 群聊显示在主列表，不再有独立「群聊」页面；此处仅返回主列表并刷新
+    App.showTab('chatlist');
+    try { if (typeof ChatList !== 'undefined' && ChatList.render) ChatList.render(); } catch (e) {}
   }
   async function renderGroups() {
     const body = document.getElementById('groups-body');
@@ -131,6 +147,8 @@ const GroupChat = (() => {
   /* ---------------- 群会话 ---------------- */
   async function openGroupChat(name, from) {
     if (from) backTo = from;
+    // 打开群时强制刷新角色列表，同步用户在酒馆改过的头像/标签（force 绕过 60s 缓存）
+    try { if (typeof App !== 'undefined' && App.refreshCharacters) await App.refreshCharacters(true); } catch (e) {}
     try {
       current = await API.getWeChatGroup(name);
     } catch (e) { UI.toast('打开群聊失败：' + e.message); return; }
@@ -879,12 +897,9 @@ const GroupChat = (() => {
 
   /* ---------------- 初始化 ---------------- */
   function init() {
-    document.getElementById('btn-chatlist-groups').addEventListener('click', openGroups);
-    document.getElementById('btn-groups-back').addEventListener('click', () => App.showTab('chatlist'));
-    document.getElementById('btn-groups-add').addEventListener('click', openCreateModal);
+    // 独立群聊页已删除：群聊并入主「微信」列表；新建群聊入口在「发起会话」弹层（chatlist.js）
     document.getElementById('btn-group-chat-back').addEventListener('click', () => {
-      if (backTo === 'page-groups' || backTo === 'page-group-info') openGroups();
-      else { App.showTab('chatlist'); }
+      App.showTab('chatlist');
     });
     document.getElementById('btn-group-chat-info').addEventListener('click', openGroupInfo);
     const infoBack = document.getElementById('btn-group-info-back');
@@ -1324,5 +1339,5 @@ const GroupChat = (() => {
     ta.style.height = Math.min(ta.scrollHeight, 96) + 'px';
   }
 
-  return { init, openGroups, openGroupChat, renderGroups, replyGroupBackground, groupSpontaneous };
+  return { init, openGroups, openGroupChat, openCreateModal, replyGroupBackground, groupSpontaneous };
 })();

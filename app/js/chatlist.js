@@ -118,8 +118,15 @@ const ChatList = (() => {
       mask.className = 'modal-mask';
       const card = document.createElement('div');
       card.className = 'modal-card';
-      card.innerHTML = `<div class="modal-title">选择角色发起会话</div><div class="list" id="picker-list"></div>`;
+      card.innerHTML = `<div class="modal-title">选择角色发起会话</div>
+        <div class="picker-new-group" id="picker-new-group">＋ 新建群聊</div>
+        <div class="list" id="picker-list"></div>`;
       const list = card.querySelector('#picker-list');
+      const newGroup = card.querySelector('#picker-new-group');
+      newGroup.addEventListener('click', () => {
+        mask.remove();
+        if (typeof GroupChat !== 'undefined' && GroupChat.openCreateModal) GroupChat.openCreateModal();
+      });
       list.innerHTML = chars.slice().sort((a,b)=>(a.name||'').localeCompare(b.name||'','zh')).map(c =>
         `<div class="list-item picker-item" data-key="${UI.esc(App.charKey(c))}"><div class="avatar sm">${UI.avatarSrc(c.avatar)?`<img src="${UI.esc(UI.avatarSrc(c.avatar))}">`:''}</div><div class="list-main"><div class="list-title">${UI.esc(App.displayName(c))}</div></div></div>`
       ).join('');

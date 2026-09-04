@@ -31,18 +31,19 @@ const App = (() => {
     const cfg = state.config || {};
     const wl = (Array.isArray(cfg.whitelist) ? cfg.whitelist : []).map(String);
     const excluded = (Array.isArray(cfg.whitelistExcluded) ? cfg.whitelistExcluded : []).map(String);
-    const autoTag = String(cfg.autoWhitelistTag || '').trim();
+    // 自动 tag 支持多选（逗号分隔）：命中任一 tag 即加入
+    const autoTags = String(cfg.autoWhitelistTag || '').split(',').map(s => s.trim()).filter(Boolean);
     const keys = new Set(wl);
-    if (autoTag) {
+    if (autoTags.length) {
       state.allCharacters.forEach(c => {
-        if ((c.tag || []).indexOf(autoTag) >= 0) keys.add(String(c.key || c.avatar_file || c.name));
+        if ((c.tag || []).some(t => autoTags.indexOf(t) >= 0)) keys.add(String(c.key || c.avatar_file || c.name));
       });
     }
     excluded.forEach(k => keys.delete(k));
     return keys;
   }
-  async function refreshCharacters() {
-    const list = await API.listCharacters();
+  async function refreshCharacters(force) {
+    const list = await API.listCharacters(force);
     state.allCharacters = list || [];
     // 白名单过滤（白名单存角色唯一标识 key = avatar_file || name）
     const wl = (state.config && state.config.whitelist) || null;

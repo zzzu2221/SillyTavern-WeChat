@@ -36,6 +36,16 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
   var LAUNCHER_ID = 'wxst-launcher';
   var SETTINGS_ID = 'wxst-settings';
   var charCache = null;   // {at:timestamp, list:[...]}
+  var serverTags = null;  // 运行时从酒馆后端 settings 拉取的 tags/tag_map（兜底，因 tags.js 是启动快照）
+
+  /* ---- 层级（z-index）常量 ----
+     酒馆自身 z-index 从几百到 21 亿（vnm-statusbar=2147483620）都有，必须用接近浏览器 int 上限
+     的大数才能稳定压住所有扩展；且移动端 body 带 transform 会形成独立层叠上下文，弹层必须挂
+     documentElement 才能用 z-index 公平竞争（见 openSettings 注释）。分两档：
+       Z_APP   —— 微信主界面（overlay/iframe），低于一切弹窗
+       Z_MODAL —— 弹窗/确认框/设置面板，最高层，唯一“盖住一切”的层 */
+  var Z_APP = 2147483600;
+  var Z_MODAL = 2147483640;
 
   function ctx() { try { return (window.SillyTavern && SillyTavern.getContext) ? SillyTavern.getContext() : null; } catch (e) { return null; } }
   function log() { try { console.log.apply(console, [LOG].concat(Array.prototype.slice.call(arguments))); } catch (e) {} }
@@ -88,9 +98,21 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     } catch (e) { return ''; }
   }
 
-  async function listCharacters() {
+  /** 从酒馆后端 settings 实时拉取 tags/tag_map（tags.js 是启动时快照，改 tag 后不刷新，这里兜底） */
+  async function ensureServerTags() {
+    try {
+      var data = await st('POST', '/api/settings/get');
+      if (data && data.tags) serverTags = { tags: data.tags, tag_map: data.tag_map || {} };
+    } catch (e) { /* 静默：拿不到就用 import 快照 */ }
+  }
+
+  async function listCharacters(force) {
     var now = Date.now();
-    if (charCache && now - charCache.at < 60000) return charCache.list;
+    if (!force && charCache && now - charCache.at < 60000) return charCache.list;
+    // tag 兜底：import 不可用/为空时从酒馆后端 settings 读取 tags/tag_map
+    if ((!ST_TAGS || !ST_TAGS.length) || (!ST_TAG_MAP || !Object.keys(ST_TAG_MAP).length)) {
+      try { await ensureServerTags(); } catch (e) {}
+    }
     var chars = null;
     try { var c = ctx(); if (c && c.getCharacters) chars = await c.getCharacters(); } catch (e) {}
     if (!chars || !chars.length) { try { chars = ctx().characters || []; } catch (e) {} }
@@ -112,18 +134,34 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
           alternateGreetings: Array.isArray(ch.alternate_greetings) ? ch.alternate_greetings.map(function (x) { return String(x); }) : [],
           tag: (function () {
             // ST 把用户手动打的 tag 存在 settings.json 的 tags(id->name) + tag_map(avatar->tag id)
+            var tm = ST_TAG_MAP || {};
+            var tl = ST_TAGS || [];
+            // 兜底：import 不可用/为空时从酒馆后端 settings 读取（含子目录角色的纯文件名匹配）
+            if (serverTags) {
+              if (!tm || !Object.keys(tm).length) tm = serverTags.tag_map || {};
+              if (!tl || !tl.length) tl = serverTags.tags || [];
+            }
             var ids = [];
             try {
-              var tm = ST_TAG_MAP || {};
-              var raw = tm[String(ch.avatar || '')];
-              ids = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+              var av = String(ch.avatar || '');
+              var candidates = [];
+              if (av) candidates.push(av);
+              var base = av.split(/[\\/]/).pop();
+              if (base && base !== av) candidates.push(base);
+              if (ch.name) candidates.push(ch.name);
+              candidates.forEach(function (k) {
+                if (!k) return;
+                var raw = tm[k];
+                var arr = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+                arr.forEach(function (id) { var s = String(id); if (ids.indexOf(s) < 0) ids.push(s); });
+              });
             } catch (e) {}
             var names = [];
             try {
-              var tl = ST_TAGS || [];
-              ids.filter(Boolean).forEach(function (id) {
-                var t = tl.find(function (x) { return String(x.id) === String(id); });
-                names.push(t && t.name ? String(t.name) : String(id));
+              (tl || []).forEach(function (t) {
+                ids.forEach(function (id) {
+                  if (String(t.id) === String(id)) { names.push(String(t.name)); }
+                });
               });
             } catch (e) {}
             if (!names.length) {
@@ -1281,7 +1319,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       // 会让 position:fixed 的百分比尺寸（width/height:100%）错乱成 0；vw/vh 始终相对视口，不受影响
       var overlay = document.createElement('div');
       overlay.id = OVERLAY_ID;
-      overlay.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;height:100dvh;z-index:9999999;background:#ededed;display:flex;flex-direction:column;overflow:hidden;margin:0;padding:0;';
+      overlay.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;height:100dvh;z-index:' + Z_APP + ';background:#ededed;display:flex;flex-direction:column;overflow:hidden;margin:0;padding:0;';
       var topbar = document.createElement('div');
       topbar.style.cssText = 'height:44px;flex:0 0 44px;width:100%;background:#ededed;display:flex;align-items:center;justify-content:space-between;padding:0 12px;box-sizing:border-box;border-bottom:0.5px solid rgba(0,0,0,.08);';
       topbar.innerHTML =
@@ -1349,7 +1387,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     var id = 'wxst-confirm-' + Date.now();
     var wrap = document.createElement('div');
     wrap.id = id;
-    wrap.style.cssText = 'position:fixed;inset:0;z-index:999999;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;';
+    wrap.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;height:100dvh;z-index:' + Z_MODAL + ';background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;';
     wrap.innerHTML =
       '<div style="width:300px;max-width:80vw;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.2)">' +
         '<div style="padding:24px 18px;text-align:center;font-size:15px;color:#333;line-height:1.5">' + escHtml(msg) + '</div>' +
@@ -1364,7 +1402,58 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     });
     wrap.querySelector('[data-v="0"]').addEventListener('click', function () { close(); cb && cb(false); });
     wrap.querySelector('[data-v="1"]').addEventListener('click', function () { close(); cb && cb(true); });
-    document.body.appendChild(wrap);
+    (document.documentElement || document.body).appendChild(wrap);
+  }
+
+  /** 标签多选弹窗：实时读取酒馆现有 tag，勾选后回调（自动加入通讯录用） */
+  function wxstTagPicker(currentTags, cb) {
+    var cur = (currentTags || []).map(String);
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;height:100dvh;z-index:' + Z_MODAL + ';background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;';
+    wrap.innerHTML =
+      '<div style="width:340px;max-width:84vw;max-height:70vh;background:#fff;border-radius:10px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 8px 30px rgba(0,0,0,.2)">' +
+        '<div style="padding:14px 16px;font-size:15px;font-weight:600;color:#333;border-bottom:1px solid #eee">选择自动加入通讯录的标签</div>' +
+        '<div id="wxst-tag-list" style="flex:1;overflow:auto;padding:8px 12px;min-height:120px"></div>' +
+        '<div style="display:flex;border-top:1px solid #e5e5e5">' +
+          '<button type="button" data-v="0" style="flex:1;padding:12px;border:none;background:#fff;font-size:15px;color:#666;cursor:pointer">取消</button>' +
+          '<button type="button" data-v="1" style="flex:1;padding:12px;border:none;border-left:1px solid #e5e5e5;background:#fff;font-size:15px;color:#07C160;font-weight:600;cursor:pointer">确定</button>' +
+        '</div>' +
+      '</div>';
+    var list = wrap.querySelector('#wxst-tag-list');
+    list.innerHTML = '<div style="color:#999;font-size:13px;text-align:center;padding:20px 0">正在读取酒馆标签…</div>';
+    function render(items) {
+      if (!items || !items.length) {
+        list.innerHTML = '<div style="color:#999;font-size:13px;text-align:center;padding:20px 0">没有读取到标签，请先在酒馆「角色管理」给角色打 tag</div>';
+        return;
+      }
+      var seen = {}, uniq = [];
+      items.forEach(function (t) {
+        var n = String(t.name || t.id || '').trim();
+        if (n && !seen[n]) { seen[n] = 1; uniq.push(n); }
+      });
+      if (!uniq.length) { list.innerHTML = '<div style="color:#999;font-size:13px;text-align:center;padding:20px 0">暂无标签</div>'; return; }
+      list.innerHTML = uniq.map(function (n) {
+        return '<label style="display:flex;align-items:center;gap:8px;padding:9px 4px;border-bottom:1px solid #f5f5f5;font-size:14px;color:#333;cursor:pointer"><input type="checkbox" value="' + escHtml(n) + '"' + (cur.indexOf(n) >= 0 ? ' checked' : '') + ' style="width:16px;height:16px"> ' + escHtml(n) + '</label>';
+      }).join('');
+    }
+    function close() { if (wrap && wrap.parentNode) wrap.parentNode.removeChild(wrap); }
+    wrap.addEventListener('click', function (e) { if (e.target === wrap) { close(); cb && cb(null); } });
+    wrap.querySelector('[data-v="0"]').addEventListener('click', function () { close(); cb && cb(null); });
+    wrap.querySelector('[data-v="1"]').addEventListener('click', function () {
+      var picked = [];
+      list.querySelectorAll('input:checked').forEach(function (i) { picked.push(i.value); });
+      close(); cb && cb(picked);
+    });
+    (document.documentElement || document.body).appendChild(wrap);
+    // 实时读取：优先 ensureServerTags 拉到的后端 tags，否则用启动快照
+    (async function () {
+      var tags = (ST_TAGS || []).slice();
+      try {
+        if (!serverTags) await ensureServerTags();
+        if (serverTags && serverTags.tags && serverTags.tags.length) tags = serverTags.tags;
+      } catch (e) {}
+      render(tags);
+    })();
   }
 
   function openSettings() {
@@ -1420,8 +1509,9 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
               '<label class="wxst-row"><input type="checkbox" id="wxst-showfab"' + (s.showFab !== false ? ' checked' : '') + '> 显示右下角悬浮按钮</label>' +
             '</div>' +
             '<div class="wxst-set-section"><div class="wxst-set-title">通讯录</div>' +
-              '<label>自动加入通讯录的 tag <input id="wxst-auto-wl-tag" value="' + escHtml(s.autoWhitelistTag || '') + '" placeholder="留空关闭。如填 wechat：打该 tag 的角色自动出现在通讯录"></label>' +
-              '<div class="wxst-set-tip">在酒馆「角色管理」给角色打上 tag 后，这里填同一个 tag，角色会自动加入通讯录（无需逐个点同意）；也可在「新朋友」里移除（会记住排除）。</div>' +
+              '<label class="wxst-row">自动加入通讯录的 tag <span class="wxst-tag-val" id="wxst-auto-tag-val" data-val="' + escHtml(s.autoWhitelistTag || '') + '" style="color:#07C160;font-weight:600;margin-left:4px;word-break:break-all">' + escHtml(s.autoWhitelistTag || '未设置') + '</span></label>' +
+              '<div class="wxst-row" style="gap:8px"><button class="wxst-mini-btn" id="wxst-auto-tag-pick" type="button">选择标签</button><button class="wxst-mini-btn" id="wxst-auto-tag-clear" type="button">清空</button></div>' +
+              '<div class="wxst-set-tip">点「选择标签」从酒馆现有 tag 里勾选（可多选，逗号分隔）。打中任一所选 tag 的角色会自动出现在通讯录；也可在「新朋友」里移除（会记住排除）。</div>' +
             '</div>' +
             '<div class="wxst-set-section"><div class="wxst-set-title">聊天</div>' +
               '<label>全局聊天背景 <input id="wxst-chatbg" value="' + escHtml(s.chatBg || '') + '" placeholder="色值如 #E8E8E8 或图片 URL；每个角色也可在「角色详情 → 聊天背景」单独设置"></label>' +
@@ -1502,7 +1592,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     // 内联强制全屏遮罩+居中：绕开移动端 CSS 缓存/transform 干扰（与 overlay 同机制）
     try {
       var maskEl = modal.querySelector('.wxst-settings-mask');
-      if (maskEl) maskEl.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;height:100dvh;z-index:99999999;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;margin:0;padding:0;';
+      if (maskEl) maskEl.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;height:100dvh;z-index:' + Z_MODAL + ';background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;margin:0;padding:0;';
       var cardEl = modal.querySelector('.wxst-settings-card');
       if (cardEl) cardEl.style.cssText = 'width:min(560px,92vw);max-height:86vh;max-height:86dvh;background:#fff;border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.25);';
     } catch (e3) { log('设置面板内联样式失败:', e3 && e3.message); }
@@ -1524,6 +1614,24 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
 
     document.getElementById('wxst-set-close').addEventListener('click', function () { modal.remove(); });
     modal.addEventListener('click', function (e) { if (e.target.classList && e.target.classList.contains('wxst-settings-mask')) modal.remove(); });
+
+    // 通讯录 tag：读取酒馆现有 tag 弹窗选择（可多选）
+    var tagValEl = document.getElementById('wxst-auto-tag-val');
+    var tagPickEl = document.getElementById('wxst-auto-tag-pick');
+    if (tagPickEl) tagPickEl.addEventListener('click', function () {
+      var cur = String(tagValEl.getAttribute('data-val') || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      wxstTagPicker(cur, function (picked) {
+        if (!picked) return;
+        var v = picked.join(',');
+        tagValEl.setAttribute('data-val', v);
+        tagValEl.textContent = v || '未设置';
+      });
+    });
+    var tagClearEl = document.getElementById('wxst-auto-tag-clear');
+    if (tagClearEl) tagClearEl.addEventListener('click', function () {
+      tagValEl.setAttribute('data-val', '');
+      tagValEl.textContent = '未设置';
+    });
 
     // 预设增删
     function reindexPresets() {
@@ -1617,8 +1725,8 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       s.autoCommentN = _amax;
       var eaEl = document.getElementById('wxst-enable-article');
       if (eaEl) s.enableArticle = eaEl.checked;
-      var tagEl = document.getElementById('wxst-auto-wl-tag');
-      if (tagEl) s.autoWhitelistTag = String(tagEl.value || '').trim();
+      var tagEl = document.getElementById('wxst-auto-tag-val');
+      if (tagEl) s.autoWhitelistTag = String(tagEl.getAttribute('data-val') || '').trim();
       var bgEl = document.getElementById('wxst-chatbg');
       if (bgEl) s.chatBg = String(bgEl.value || '').trim();
       // AI 回复行为
@@ -1955,7 +2063,12 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     var chars = await listCharacters();
     // 成员名（微信备注名）→ 真实角色 key 映射：AI 输出的是名字，落库必须用 key，否则头像/身份对不上
     var keyByName = {};
-    members.forEach(function (m) { keyByName[m.name] = m.key; });
+    members.forEach(function (m) {
+      keyByName[m.name] = m.key;
+      // 兼容角色卡名字带空格（如「 虎杖悠仁」）：去空格后的名字也映射到群成员 key，避免 AI 输出正常名时被同名卡抢走
+      var _t = String(m.name || '').trim();
+      if (_t && _t !== m.name && !keyByName[_t]) keyByName[_t] = m.key;
+    });
     // 玩家别名：历史里玩家可能被写成「玩家」「我」等，都映射到玩家 key（__me__ 开头那个成员）
     members.forEach(function (m) {
       if (String(m.key).indexOf('__me__') === 0) {

@@ -526,11 +526,17 @@ const Me = (() => {
       const search = document.getElementById('rp-search');
       const tagSel = document.getElementById('rp-tag');
       const list = document.getElementById('rp-list');
+      const addBtn = document.getElementById('rp-add');
       const chars = App.state.allCharacters || [];
       const used = new Set((player.relations || []).map(x => x.key));
-      // tag 分组下拉
+      const sel = new Set(); // 勾选中的角色 key（支持多选批量添加）
+      // tag 分组下拉：读取酒馆角色标签，可按分组筛选
       const tags = Array.from(new Set(chars.reduce((a, c) => a.concat(c.tag || []), []))).sort();
       tagSel.innerHTML = '<option value="">全部分组</option>' + tags.map(t => `<option>${UI.esc(t)}</option>`).join('');
+      function updateAddBtn() {
+        addBtn.textContent = '添加所选（' + sel.size + '）';
+        addBtn.disabled = !sel.size;
+      }
       function render() {
         const q = (search.value || '').trim().toLowerCase();
         const tg = tagSel.value;
@@ -542,22 +548,24 @@ const Me = (() => {
         });
         if (!filtered.length) { list.innerHTML = '<div class="empty small">没有可添加的角色（可切换分组/搜索，或先去酒馆给角色加 tag）</div>'; return; }
         list.innerHTML = filtered.map(c => {
+          const k = App.charKey(c);
+          const on = sel.has(k);
           const avatar = UI.avatarSrc(c.avatar) ? `<img src="${UI.esc(UI.avatarSrc(c.avatar))}">` : '';
           const tagsHtml = (c.tag || []).map(t => `<span class="rp-tag">${UI.esc(t)}</span>`).join('');
-          return `<div class="rp-item" data-key="${UI.esc(App.charKey(c))}">
+          return `<div class="rp-item${on ? ' sel' : ''}" data-key="${UI.esc(k)}">
+            <span class="rp-check${on ? ' on' : ''}"></span>
             <div class="avatar">${avatar}</div>
             <div class="rp-main"><div class="rp-name">${UI.esc(App.displayName(c))}</div><div class="rp-tags">${tagsHtml || '<span class="rp-tag-none">无 tag</span>'}</div></div>
-            <button class="friend-btn friend-ok" type="button">添加</button>
           </div>`;
         }).join('');
         list.querySelectorAll('.rp-item').forEach(el => {
-          el.querySelector('button').addEventListener('click', () => {
-            const key = el.dataset.key;
-            const c = App.charByKey(key);
-            player.relations.push({ key, name: App.displayName(c), relation: '好友', note: '', imgTag: '' });
-            renderRelations(player);
-            modal.style.display = 'none';
-            UI.toast('已添加 ' + App.displayName(c));
+          el.addEventListener('click', () => {
+            const k = el.dataset.key;
+            if (sel.has(k)) sel.delete(k); else sel.add(k);
+            el.classList.toggle('sel');
+            const chk = el.querySelector('.rp-check');
+            if (chk) chk.classList.toggle('on');
+            updateAddBtn();
           });
         });
       }
@@ -565,6 +573,20 @@ const Me = (() => {
       search.oninput = render;
       tagSel.onchange = render;
       render();
+      updateAddBtn();
+      addBtn.onclick = () => {
+        if (!sel.size) return;
+        sel.forEach(k => {
+          if (used.has(k)) return;
+          const c = App.charByKey(k);
+          if (!c) return;
+          player.relations.push({ key: k, name: App.displayName(c), relation: '好友', note: '', imgTag: '' });
+          used.add(k);
+        });
+        renderRelations(player);
+        modal.style.display = 'none';
+        UI.toast('已添加 ' + sel.size + ' 个角色');
+      };
       modal.style.display = 'flex';
       document.getElementById('rp-cancel').onclick = () => { modal.style.display = 'none'; };
       modal.onclick = (e) => { if (e.target === modal) modal.style.display = 'none'; };

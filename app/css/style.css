@@ -80,6 +80,8 @@ body {
 }
 .list-item:active { background: #f2f2f2; }
 .list-item:last-child { border-bottom: none; }
+.picker-new-group { margin: 4px 0 8px; padding: 12px; border: 1px dashed #07c160; border-radius: 10px; color: #07c160; text-align: center; font-size: 14px; font-weight: 600; cursor: pointer; background: #f2fbf6; }
+.picker-new-group:active { background: #e5f6ed; }
 .avatar {
   width: 46px; height: 46px; border-radius: 6px;
   background: #eee center/cover no-repeat; flex: none;
@@ -591,7 +593,12 @@ body {
 .rp-search input { flex: 1; font-size: 13px; padding: 8px; border: 1px solid #e0e0e0; border-radius: 6px; color: #111; }
 .rp-search select { font-size: 13px; padding: 8px; border: 1px solid #e0e0e0; border-radius: 6px; background: #fff; color: #111; max-width: 120px; }
 .rp-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-.rp-item { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid #f0f0f0; border-radius: 10px; background: #fff; }
+.rp-item { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid #f0f0f0; border-radius: 10px; background: #fff; cursor: pointer; transition: background .15s; }
+.rp-item:active { background: #f2f2f2; }
+.rp-item.sel { border-color: #07c160; background: #f2fbf6; }
+.rp-check { width: 20px; height: 20px; flex: 0 0 20px; border-radius: 50%; border: 2px solid #ccc; box-sizing: border-box; position: relative; }
+.rp-check.on { border-color: #07c160; background: #07c160; }
+.rp-check.on::after { content: ''; position: absolute; left: 5px; top: 2px; width: 5px; height: 10px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
 .rp-item .avatar { width: 40px; height: 40px; flex: 0 0 40px; }
 .rp-main { flex: 1; }
 .rp-name { font-size: 14px; font-weight: 600; color: #111; }

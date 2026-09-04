@@ -31,7 +31,7 @@ const API = (() => {
     config: () => requireBridge().getConfig(),
 
     /* --- 角色 --- */
-    listCharacters: () => requireBridge().listCharacters(),
+    listCharacters: (force) => requireBridge().listCharacters(force),
 
     /* --- 聊天 --- */
     getChat: (avatar, file) => requireBridge().getChat(avatar, file),
