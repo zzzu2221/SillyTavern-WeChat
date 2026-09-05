@@ -779,6 +779,15 @@ const GroupChat = (() => {
       await triggerAI();
     } catch (e) { UI.toast('重说失败：' + e.message); }
   }
+  async function regenerateGroupMsg(rawIdx) {
+    // 撤回：只删除当前这条 AI 消息，然后让群成员自然接话（保留后面的消息）
+    try {
+      await API.deleteWeChatMessage(current.name, rawIdx);
+      current = await API.getWeChatGroup(current.name);
+      renderChat(true);
+      await triggerAI('刚才有一条消息被撤回了，请群成员自然地接着刚才的话题继续聊。');
+    } catch (e) { UI.toast('撤回失败：' + e.message); }
+  }
   function openGroupMsgMenu(rawIdx) {
     const m = (current.messages || []).find(x => x._rawIndex === rawIdx);
     if (!m) return;
@@ -795,6 +804,7 @@ const GroupChat = (() => {
       sheet.appendChild(b);
     };
     if (!isMe) btn('重说', false, () => resayGroupMsg(rawIdx));
+    if (!isMe) btn('撤回', false, () => regenerateGroupMsg(rawIdx));
     btn('删除', true, async () => {
       const ok = await UI.confirm('删除这条消息？', { okText: '删除' });
       if (ok) delGroupMsg(rawIdx);
