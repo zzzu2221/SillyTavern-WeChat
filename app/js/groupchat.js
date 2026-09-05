@@ -769,7 +769,7 @@ const GroupChat = (() => {
   async function resayGroupMsg(rawIdx) {
     // 截断：删除该条及其后所有消息，再让 AI 重新接话
     const msgs = current.messages || [];
-    const i = msgs.findIndex(m => m._rawIndex === rawIdx);
+    const i = msgs.findIndex(m => m._rawIndex === Number(rawIdx));
     if (i < 0) return;
     const rawIndexes = msgs.slice(i).map(m => m._rawIndex).sort((a, b) => b - a);
     try {
@@ -789,7 +789,8 @@ const GroupChat = (() => {
     } catch (e) { UI.toast('撤回失败：' + e.message); }
   }
   function openGroupMsgMenu(rawIdx) {
-    const m = (current.messages || []).find(x => x._rawIndex === rawIdx);
+    const idx = Number(rawIdx);
+    const m = (current.messages || []).find(x => x._rawIndex === idx);
     if (!m) return;
     const isMe = String(m.key || '').indexOf('__me__') === 0;
     const mask = document.createElement('div');
@@ -1346,5 +1347,5 @@ const GroupChat = (() => {
     ta.style.height = Math.min(ta.scrollHeight, 96) + 'px';
   }
 
-  return { init, openGroups, openGroupChat, openCreateModal, replyGroupBackground, groupSpontaneous };
+  return { init, openGroups, openGroupChat, openCreateModal, replyGroupBackground, groupSpontaneous, openGroupMsgMenu };
 })();

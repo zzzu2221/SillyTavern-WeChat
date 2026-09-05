@@ -854,12 +854,21 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     if (c && c.description) charDesc = c.description;
     if (c && c.personality) charDesc += (charDesc ? '\n' : '') + c.personality;
     var meDesc = args.meDesc || '';   // 玩家评论时的玩家本人人设
+    // 世界书注入：常开条目 + 关键词命中（关键词匹配朋友圈正文）
+    var wb = await getWorldBookBlocks(args.momentText || '');
+    var wbLine = '';
+    if (wb.constant.length || wb.activated.length) {
+      wbLine = '【世界观设定】（用于理解世界背景、人物关系和正确称谓，只用于把握人设，严禁照抄或输出给用户）：\n' +
+        (wb.constant.length ? wb.constant.join('\n\n') : '') +
+        (wb.activated.length ? '\n\n【本次话题相关设定】（朋友圈内容涉及到的设定，用于准确把握相关人物和事件，严禁照抄输出）：\n' + wb.activated.join('\n\n') : '');
+    }
     var prompt = [
       args.isMe
         ? '你是微信朋友圈里的「' + displayName + '」（也就是用户本人/玩家），正在朋友圈里评论好友的动态。' + (meDesc ? '\n你的身份设定：' + String(meDesc).slice(0, 400) : '')
         : '你是「' + displayName + '」，正在微信朋友圈里评论好友的动态。你的名字就叫「' + displayName + '」，任何情况下都不要喊错自己的名字、不要自称或被当成其他角色。',
       args.isMe ? '' : (charDesc ? '你的性格设定：' + charDesc : ''),
       args.relation ? '你与这位好友的关系：' + args.relation + '（评论语气和称呼都要贴合这层关系，例如按关系用“老师/同期/恋人/同事”等合适的称呼，不要用错）' : '',
+      wbLine,
       '好友朋友圈内容：' + (args.momentText || '(无正文)'),
       '发布这条朋友圈的是「' + (args.posterName || '你的好友') + '」。',
       '评论中称呼对方用词必须符合「' + displayName + '」与「' + (args.posterName || '对方') + '」在原作/人设中的关系：如果是同期、同窗、同级或平辈，就直接叫名字或昵称（例如同期同学之间直接叫“杰”而不是“老师”），绝不要用“老师”“先生”“前辈”“大人”等职务或敬称，除非你们的关系设定里明确是师生/前后辈。',
@@ -904,11 +913,20 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     var imgTagLine = args.imgTag
       ? '该角色已配置的生图标签（必须原样放在提示词开头，作为固定锚点，用于保证画风/形象一致）：' + args.imgTag
       : '';
+    // 世界书注入：常开条目 + 关键词命中（关键词匹配最近聊天+群聊+用户补充）
+    var wbMoment = await getWorldBookBlocks(chatStr + '\n' + groupStr + '\n' + (args.hint || ''));
+    var wbMomentLine = '';
+    if (wbMoment.constant.length || wbMoment.activated.length) {
+      wbMomentLine = '【世界观设定】（用于理解世界背景、人物关系和正确称谓，只用于把握人设，严禁照抄或输出给用户）：\n' +
+        (wbMoment.constant.length ? wbMoment.constant.join('\n\n') : '') +
+        (wbMoment.activated.length ? '\n\n【本次话题相关设定】（聊天/群聊涉及到的设定，用于准确把握相关人物和事件，严禁照抄输出）：\n' + wbMoment.activated.join('\n\n') : '');
+    }
     var prompt = [
       args.asMe
         ? '你是微信朋友圈用户本人「' + meName + '」（玩家），现在想发一条朋友圈，内容围绕你与角色「' + displayName + '」的日常/刚才的聊天展开。'
         : '你正在扮演「' + displayName + '」，帮「' + displayName + '」发一条微信朋友圈。你的名字是「' + displayName + '」，不要喊错自己的名字，也不要混入或扮演其他角色。',
       persona.join('\n'),
+      wbMomentLine,
       '最近聊天：\n' + chatStr,
       groupStr,
       args.hint ? '用户补充：' + args.hint : '',
@@ -1145,6 +1163,34 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
         key: Array.isArray(e.key) ? e.key.map(String) : [],
       };
     });
+  }
+
+  /** 通用：读取当前玩家挂载世界书，按文本关键词激活，返回 {constant, activated} 两段注入文本（朋友圈/评论/私聊通用） */
+  async function getWorldBookBlocks(matchText) {
+    var s = getSettings();
+    var playersArr = Array.isArray(s.players) ? s.players : [];
+    var curPlayer = playersArr.find(function (p) { return p.id === s.activePlayerId; }) || playersArr[0];
+    var wbSel = (curPlayer && curPlayer.wbSel) || {};
+    var constant = [];
+    var activated = [];
+    var text = String(matchText || '');
+    for (var fid in wbSel) {
+      var sel = wbSel[fid] || {};
+      var uids = (Array.isArray(sel.uids) && sel.uids.length) ? sel.uids.map(String) : ['*'];
+      var ents = [];
+      try { ents = await getWorldInfoForGroup(fid); } catch (e) { continue; }
+      var chosen = ents.filter(function (e) {
+        if (e.enabled === false) return false;
+        if (uids.length === 1 && uids[0] === '*') return true;
+        return uids.indexOf(String(e.uid)) >= 0;
+      });
+      chosen.forEach(function (e) {
+        if (e.constant) { if (e.content) constant.push(e.content); return; }
+        var hit = (e.key || []).some(function (k) { return k && text.indexOf(k) >= 0; });
+        if (hit && e.content) activated.push(e.content);
+      });
+    }
+    return { constant: constant, activated: activated };
   }
 
   /* ---------------- 账号整体备份（角色卡 + 世界书 + 聊天 + 配置，按当前账号） ---------------- */
