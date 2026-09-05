@@ -304,6 +304,21 @@ const Chat = (() => {
       if (playerWb) parts.push(`关于我（世界书/设定）：${playerWb}`);
     }
     parts.push(`你是${c.name}。`);
+    // 角色与其他通讯录角色的关系（charRelations 全局通用）：让 AI 知道自己和其他人的关系，称呼/态度符合
+    try {
+      const _cKey = App.charKey(c);
+      const _charRel = (API.getSettings() || {}).charRelations || {};
+      const _relMap = _charRel[_cKey] || {};
+      const _relEntries = Object.entries(_relMap).filter(([, v]) => v && v !== '认识' && v !== '陌生人');
+      if (_relEntries.length) {
+        const _wl = (App.state && App.state.characters) || [];
+        const _relStr = _relEntries.map(([k, v]) => {
+          const _other = _wl.find(x => App.charKey(x) === k || x.name === k);
+          return (_other ? _other.name : k) + '：' + v;
+        }).join('、');
+        parts.push(`你和其他人的关系：${_relStr}`);
+      }
+    } catch (e) {}
     if (c.description) parts.push(`角色设定：${c.description}`);
     if (c.personality) parts.push(`性格：${c.personality}`);
     if (c.scenario) parts.push(`场景：${c.scenario}`);

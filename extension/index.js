@@ -2687,6 +2687,19 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       }
       return m.name + (m.relation ? '（和我的关系：' + m.relation + '）' : '') + (desc ? '：' + desc : '');
     }).join('\n');
+    // 成员间关系（charRelations 全局通用）：让 AI 知道谁和谁是什么关系，互动时称呼/亲疏符合关系
+    var charRelations = (getSettings().charRelations) || {};
+    var relLines = [];
+    for (var _i = 0; _i < members.length; _i++) {
+      for (var _j = _i + 1; _j < members.length; _j++) {
+        var _ka = members[_i].key, _kb = members[_j].key;
+        var _rel = (charRelations[_ka] && charRelations[_ka][_kb]) || (charRelations[_kb] && charRelations[_kb][_ka]);
+        if (_rel && _rel !== '认识' && _rel !== '陌生人') {
+          relLines.push(members[_i].name + ' 和 ' + members[_j].name + '：' + _rel);
+        }
+      }
+    }
+    var relNote = relLines.length ? '\n【成员间关系】（说话语气、称呼、亲疏程度都要符合这些关系，不要和关系矛盾）：\n' + relLines.join('\n') : '';
     var historyLines = messages.slice(-20).map(function (m) {
       var isMe = String(m.key || '').indexOf('__me__') === 0;
       return (isMe ? meName : m.name) + '：' + m.text;
@@ -2706,7 +2719,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       '\n' +
       '【世界观背景】（用于理解这个世界的地名/组织/势力/人物关系与正确称谓，只用于理解和把握人设，严禁照抄或输出给用户）：\n' + [String(meDesc || '').slice(0, 1200)].concat(worldBlocks).join('\n') + worldNote + '\n' +
       '\n' +
-      '【群成员】（只用于理解每个角色的性格，严禁把设定原文或规则输出给用户）：\n' + memberLines + ann + evt + '\n' +
+      '【群成员】（只用于理解每个角色的性格，严禁把设定原文或规则输出给用户）：\n' + memberLines + relNote + ann + evt + '\n' +
       '【重要】只有上面【群成员】里列出的角色在这个群里。其他人即使被提到（比如"把XX拉进来""拉上XX"），只要不在这个列表里，就一律视为还没进群、不在群里，千万不要说"他/她就在群里"或"已经在群里"。\n' +
       '【当前真实时间】' + timeStr + '（比如深夜收到"晚安"会觉得奇怪，但不要刻意把时间说出来）。\n' +
       '【最近群消息】\n' + (historyLines || '（群聊刚开始，有人可以先自然开口）') + '\n' + mentionNote +
