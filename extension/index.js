@@ -954,7 +954,9 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       var im = content.match(/["']?imgPrompt["']?\s*[:：]\s*["']([^"']+)["']/);
       obj = { text: tm ? tm[1] : content.slice(0, 60), imgPrompt: im ? im[1] : '' };
     }
-    return { text: String(obj.text || '').trim(), imgPrompt: String(obj.imgPrompt || '').trim() };
+    // 清洗私聊多气泡标记 |||（朋友圈正文不应有 |||）
+    var cleanText = String(obj.text || '').trim().replace(/\s*\|\|\|\s*/g, '');
+    return { text: cleanText, imgPrompt: String(obj.imgPrompt || '').trim() };
   }
 
   /* ---------------- 公众号（酒馆群组存储，AI 按世界观写文；按账号隔离） ---------------- */

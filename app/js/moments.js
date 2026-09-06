@@ -212,7 +212,7 @@ const Moments = (() => {
             </div>
             ${`<span class="moment-del" data-idx="${idx}" title="删除这条动态">⋯</span>`}
           </div>
-          ${p.text ? `<div class="moment-text">${UI.esc(window.stripActions ? window.stripActions(p.text) : p.text).replace(/\n/g, '<br>')}</div>` : ''}
+          ${p.text ? `<div class="moment-text">${UI.esc(commentText(p.text)).replace(/\n/g, '<br>')}</div>` : ''}
           ${imgHtml}
           <div class="moment-comments">${commentsHtml}</div>
           <div class="comment-actions">
