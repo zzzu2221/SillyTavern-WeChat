@@ -2899,6 +2899,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     listWorldInfos: listWorldInfos,
     getWorldInfoText: getWorldInfoText,
     getWorldInfoEntries: getWorldInfoEntries,
+    getWorldBookBlocks: getWorldBookBlocks,
     genRoleWorldbook: genRoleWorldbook,
     exportAccount: exportAccountBackup,
     importAccount: importAccountBackup,

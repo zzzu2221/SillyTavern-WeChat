@@ -284,7 +284,7 @@ const Chat = (() => {
   }
 
   /* ---- 构建模型上下文 ---- */
-  function buildSystemPrompt(char) {
+  async function buildSystemPrompt(char, matchText) {
     const c = char || ctx.char;
     const parts = [];
     // Player 身份（账号切换后这里随之变化）
@@ -300,8 +300,20 @@ const Chat = (() => {
       if (player.name && player.name !== '我') parts.push(`我是「${player.name}」。`);
       if (player.signature) parts.push(`我的个性签名：${player.signature}`);
       if (player.description) parts.push(`关于我（账号设定）：${player.description}`);
-      const playerWb = [player.mountedText, player.worldbook].filter(Boolean).join('\n');
-      if (playerWb) parts.push(`关于我（世界书/设定）：${playerWb}`);
+      // 世界书按需注入：常开条目直接注入，关键词条目按聊天内容激活（提到谁才注入谁的人设，不再全量塞所有人设）
+      try {
+        const wbMatch = (matchText || '') + '\n' + (c.name || '');
+        const wb = await API.getWorldBookBlocks(wbMatch);
+        const wbParts = [];
+        if (wb.constant && wb.constant.length) wbParts.push('【常开世界观】\n' + wb.constant.join('\n\n'));
+        if (wb.activated && wb.activated.length) wbParts.push('【本次话题相关设定】（聊天中提到的角色/事件，用于准确把握人设，严禁照抄输出）\n' + wb.activated.join('\n\n'));
+        if (player.worldbook) wbParts.push('【手动补充设定】\n' + player.worldbook);
+        if (wbParts.length) parts.push(`关于我（世界书/设定）：\n${wbParts.join('\n\n')}`);
+      } catch (e) {
+        // 降级：全量注入（API 不可用时兜底）
+        const playerWb = [player.mountedText, player.worldbook].filter(Boolean).join('\n');
+        if (playerWb) parts.push(`关于我（世界书/设定）：${playerWb}`);
+      }
     }
     parts.push(`你是${c.name}。`);
     // 角色与其他通讯录角色的关系（charRelations 全局通用）：让 AI 知道自己和其他人的关系，称呼/态度符合
@@ -400,7 +412,8 @@ const Chat = (() => {
       await persistChatFor(myAvatar, myFile, myChat);
       const hist = buildHistory(myChat);
       if (extraEvent) hist.push({ role: 'user', content: extraEvent });
-      const messages = [{ role: 'system', content: buildSystemPrompt(myChar) }, ...hist];
+      const sysPrompt = await buildSystemPrompt(myChar, hist.map(m => String(m.content || '')).join('\n'));
+      const messages = [{ role: 'system', content: sysPrompt }, ...hist];
       const reply = await API.genChat(messages, { temperature: 0.9 });
       if (!isBg && myReq !== sessionSeq[myFile]) { if (pendingMap[myFile] === myReq) delete pendingMap[myFile]; return; } // 本会话内已被撤回/删除/重说作废，不写入
       const content = (reply.content || '').trim();
@@ -536,8 +549,9 @@ const Chat = (() => {
     const promptLine = asActive
       ? '现在你是「' + name + '」，主动找玩家聊聊（分享近况、问个事、吐槽、约个饭都行，符合你的性格和你们现在的关系）。参考你们最近的聊天内容自然地接着聊，别重复已经说过的话，别把刚聊过的内容再问一遍。像真人发微信那样口语化，一句到两句。只发说出口的话，不要动作/表情/心理描写，不要括号，不要解释自己。'
       : '（新事件：' + eventText + '）现在你是「' + name + '」，主动给玩家发一条微信消息，围绕这件事自然地说一句话（质问、吐槽、解释都行，符合你的性格）。只发说出口的话，口语化，不要动作/表情/心理描写，不要括号，不要解释自己。';
+    const sysPrompt = await buildSystemPrompt(char, hist.map(m => String(m.content || '')).join('\n'));
     const messages = [
-      { role: 'system', content: buildSystemPrompt(char) },
+      { role: 'system', content: sysPrompt },
       ...hist,
       { role: 'user', content: promptLine },
     ];
