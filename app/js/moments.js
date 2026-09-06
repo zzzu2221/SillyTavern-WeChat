@@ -137,10 +137,12 @@ const Moments = (() => {
     s = s.replace(/^(?:【?朋友圈评论】?)?[\s:：]*对应动态id=[^;]*;?(?:\s*角色=[^;]*;?)?(?:\s*key=[^;]*;?)?(?:\s*时间=[^;]*;?)?\s*评论=\s*/i, '');
     return s.trim();
   }
-  /** 评论显示文本：括号清洗 + 标记剥离 */
+  /** 评论显示文本：括号清洗 + 标记剥离 + ||| 多气泡标记清洗 */
   function commentText(t) {
     const clean = cleanCommentTag(t);
-    return window.stripActions ? window.stripActions(clean) : clean;
+    const stripped = window.stripActions ? window.stripActions(clean) : clean;
+    // 清洗私聊多气泡标记 |||（AI 评论时可能误用）
+    return stripped.replace(/\s*\|\|\|\s*/g, '').trim();
   }
 
   function filteredPosts() {
@@ -512,7 +514,7 @@ const Moments = (() => {
     for (const c of picked) {
       try {
         const rel = rels.find(r => r.key === App.charKey(c));
-        const r = await API.aiComment({ momentId: post.id, character: App.charKey(c), characterName: shownName(c), momentText: post.text || '', posterName: post.character || '', relation: rel ? (rel.relation || '') : '' });
+        const r = await API.aiComment({ momentId: post.id, character: App.charKey(c), characterName: shownName(c), momentText: post.text || '', posterName: post.character || '', relation: rel ? (rel.relation || '') : '', meName: (typeof Me !== 'undefined' && Me.activePlayer()) ? Me.activePlayer().name : '我' });
         if (r && r.text) {
           const text = commentText(r.text); // 剥离可能的存储标记前缀 + 括号清洗
           await API.addComment({ momentId: post.id, character: App.charKey(c), characterName: shownName(c), text });
@@ -780,7 +782,7 @@ const Moments = (() => {
       const r = await API.aiComment({
         momentId: commentTarget.id, character, characterName, momentText: commentTarget.text,
         isMe: who === 'me', relation: who === 'me' ? '' : ((rel && rel.relation) || ''),
-        meDesc: meDesc,
+        meDesc: meDesc, meName: (typeof Me !== 'undefined' && Me.activePlayer()) ? Me.activePlayer().name : '我',
       });
       document.getElementById('comment-text').value = r.text ? commentText(r.text) : '';
       tip.textContent = '已生成，点「发送」确认';

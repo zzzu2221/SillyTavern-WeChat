@@ -100,13 +100,17 @@ const Detail = (() => {
   }
   function saveAllRelations(key, map) {
     const all = relationsAll();
+    // 先清空当前角色的所有关系（清除已删角色的幽灵条目），同时清除其他角色指向当前角色的旧关系
+    all[key] = {};
+    Object.keys(all).forEach(k => { if (all[k] && all[k][key]) delete all[k][key]; });
+    // 只写入当前 UI 里存在的角色关系
     Object.keys(map).forEach(k => {
       const rel = map[k];
-      const a = Object.assign({}, all[key] || {});
-      const b = Object.assign({}, all[k] || {});
-      if (rel && rel !== '认识') { a[k] = rel; b[key] = rel; }
-      else { delete a[k]; delete b[key]; }
-      all[key] = a; all[k] = b;
+      if (rel && rel !== '认识') {
+        all[key][k] = rel;
+        if (!all[k]) all[k] = {};
+        all[k][key] = rel;
+      }
     });
     API.saveAppSettings({ charRelations: all });
     if (App.state.config) App.state.config.charRelations = all;

@@ -854,6 +854,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
     if (c && c.description) charDesc = c.description;
     if (c && c.personality) charDesc += (charDesc ? '\n' : '') + c.personality;
     var meDesc = args.meDesc || '';   // 玩家评论时的玩家本人人设
+    var meName = args.meName || '我';  // 玩家微信名（评论者不是玩家时注入，避免 AI 把玩家当成其他角色）
     // 世界书注入：常开条目 + 关键词命中（关键词匹配朋友圈正文）
     var wb = await getWorldBookBlocks(args.momentText || '');
     var wbLine = '';
@@ -866,6 +867,7 @@ import { tags as ST_TAGS, tag_map as ST_TAG_MAP } from '../../../../tags.js';
       args.isMe
         ? '你是微信朋友圈里的「' + displayName + '」（也就是用户本人/玩家），正在朋友圈里评论好友的动态。' + (meDesc ? '\n你的身份设定：' + String(meDesc).slice(0, 400) : '')
         : '你是「' + displayName + '」，正在微信朋友圈里评论好友的动态。你的名字就叫「' + displayName + '」，任何情况下都不要喊错自己的名字、不要自称或被当成其他角色。',
+      args.isMe ? '' : '玩家（也就是用户本人，TA 由本人说话）的微信名是「' + meName + '」。绝对不要把玩家「' + meName + '」当成其他角色，不要替 TA 发言，也不要把 TA 的名字安到别人头上。如果评论里需要提到 TA，一律用「' + meName + '」称呼。',
       args.isMe ? '' : (charDesc ? '你的性格设定：' + charDesc : ''),
       args.relation ? '你与这位好友的关系：' + args.relation + '（评论语气和称呼都要贴合这层关系，例如按关系用“老师/同期/恋人/同事”等合适的称呼，不要用错）' : '',
       wbLine,
